@@ -2,203 +2,275 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>AR Social Filter & Face Fun</title>
+  <title>AR Group Photo Booth</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <style>
-    /* Remove default margin/padding and set dark background */
-    html, body {
+    /* Basic reset and styling */
+    body {
       margin: 0;
-      padding: 0;
-      overflow: hidden;
-      background-color: #000;
       font-family: sans-serif;
+      background: #222;
+      color: #ddd;
+      overflow: hidden;
     }
-    /* The video feed covers the entire background */
-    #video {
+    /* Container for file upload UI */
+    #uploadUI {
       position: absolute;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      z-index: 1;
-    }
-    /* The canvas overlay for drawing AR filters */
-    #overlay {
-      position: absolute;
-      top: 0;
-      left: 0;
-      z-index: 2;
-    }
-    /* UI buttons container */
-    #ui {
-      position: absolute;
-      top: 10px;
-      left: 10px;
+      top: 20px;
+      left: 50%;
+      transform: translateX(-50%);
       z-index: 10;
-      background: rgba(0, 0, 0, 0.5);
-      padding: 8px 12px;
-      border-radius: 5px;
-      color: white;
+      background: rgba(0, 0, 0, 0.8);
+      padding: 15px;
+      border-radius: 8px;
+      text-align: center;
     }
-    #ui button {
-      margin: 4px;
+    #uploadUI input {
       font-size: 16px;
-      padding: 6px 12px;
-      cursor: pointer;
-      background: #444;
-      border: none;
-      border-radius: 4px;
-      color: white;
     }
-    #ui button.active {
-      background: #06c;
+    /* Instruction message overlay */
+    #message {
+      position: absolute;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 10;
+      background: rgba(0, 0, 0, 0.7);
+      padding: 10px 20px;
+      border-radius: 5px;
+      font-size: 16px;
     }
   </style>
-  <!-- Load face-api.js from a CDN -->
+  <!-- Load face-api.js (non-module) from CDN -->
   <script defer src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
 </head>
 <body>
-  <!-- Video element: shows the live camera feed -->
-  <video id="video" autoplay muted playsinline></video>
-  <!-- Canvas overlay: drawn AR filter graphics (glasses, hats, etc.) -->
-  <canvas id="overlay"></canvas>
-  <!-- Simple UI for selecting filters -->
-  <div id="ui">
-    <button id="noneBtn" class="active">None</button>
-    <button id="glassesBtn">Glasses</button>
-    <button id="hatBtn">Hat</button>
+  <!-- File upload UI -->
+  <div id="uploadUI">
+    <div style="margin-bottom: 10px;">Upload a group photo to get started:</div>
+    <input type="file" id="fileInput" accept="image/*">
   </div>
+  <!-- Instruction / status message -->
+  <div id="message">Please upload a group photo.</div>
 
-  <script>
-    // Global variables
-    let currentMode = "none"; // "none", "glasses", or "hat"
+  <!-- AR scene will be added dynamically by Three.js -->
+  <script type="module">
+    import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.146.0/build/three.module.js';
+    import { ARButton } from 'https://cdn.jsdelivr.net/npm/three@0.146.0/examples/jsm/webxr/ARButton.js';
 
-    // UI button event listeners – toggle current filter mode and update active button styling.
-    const btnNone = document.getElementById("noneBtn");
-    const btnGlasses = document.getElementById("glassesBtn");
-    const btnHat = document.getElementById("hatBtn");
+    // ----------------------------
+    // Global Variables and State
+    // ----------------------------
+    let scene, camera, renderer, controller, reticle;
+    let hitTestSource = null, hitTestSourceRequested = false;
+    // This texture will hold our augmented photo once processed.
+    let augmentedTexture = null;
+    // Flag to ensure the photo is placed only once.
+    let placedAugmentedPhoto = false;
 
-    btnNone.addEventListener("click", () => { currentMode = "none"; setActive(btnNone); });
-    btnGlasses.addEventListener("click", () => { currentMode = "glasses"; setActive(btnGlasses); });
-    btnHat.addEventListener("click", () => { currentMode = "hat"; setActive(btnHat); });
+    // UI elements for file input and messages.
+    const uploadUI = document.getElementById("uploadUI");
+    const fileInput = document.getElementById("fileInput");
+    const messageEl = document.getElementById("message");
 
-    function setActive(activeButton) {
-      [btnNone, btnGlasses, btnHat].forEach(btn => btn.classList.remove("active"));
-      activeButton.classList.add("active");
+    // ----------------------------
+    // Initialize AR Scene
+    // ----------------------------
+    function initAR() {
+      // Create scene and camera.
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.01, 20);
+      
+      // Create renderer.
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setPixelRatio(window.devicePixelRatio);
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.xr.enabled = true;
+      document.body.appendChild(renderer.domElement);
+
+      // Basic lighting.
+      const light = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1);
+      light.position.set(0.5, 1, 0.25);
+      scene.add(light);
+
+      // Reticle for hit testing.
+      reticle = new THREE.Mesh(
+        new THREE.RingGeometry(0.15, 0.2, 32).rotateX(-Math.PI/2),
+        new THREE.MeshBasicMaterial({ color: 0x00ff00 })
+      );
+      reticle.matrixAutoUpdate = false;
+      reticle.visible = false;
+      scene.add(reticle);
+
+      // Controller for tap/select events.
+      controller = renderer.xr.getController(0);
+      controller.addEventListener('select', onSelect);
+      scene.add(controller);
+
+      // Add AR button.
+      document.body.appendChild(ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] }));
+
+      window.addEventListener('resize', onWindowResize, false);
+      renderer.setAnimationLoop(render);
     }
 
-    // References to the video and canvas elements
-    const video = document.getElementById("video");
-    const canvas = document.getElementById("overlay");
-    const context = canvas.getContext("2d");
+    function onWindowResize() {
+      camera.aspect = window.innerWidth/window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
 
-    // When the video plays, adjust the canvas size to match.
-    video.addEventListener("playing", () => {
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
+    // When the user taps the screen, place the augmented photo (if available).
+    function onSelect() {
+      if (reticle.visible && augmentedTexture && !placedAugmentedPhoto) {
+        // Create a plane geometry. We'll maintain the aspect ratio of the processed image.
+        const imgWidth = augmentedTexture.image.width;
+        const imgHeight = augmentedTexture.image.height;
+        const aspect = imgHeight / imgWidth;
+        const geometry = new THREE.PlaneGeometry(1, 1 * aspect);
+        const material = new THREE.MeshBasicMaterial({ map: augmentedTexture, side: THREE.DoubleSide });
+        const mesh = new THREE.Mesh(geometry, material);
+        // Position the plane at the reticle's location.
+        mesh.position.setFromMatrixPosition(reticle.matrix);
+        // Align the plane with the hit surface.
+        mesh.quaternion.setFromRotationMatrix(reticle.matrix);
+        scene.add(mesh);
+        placedAugmentedPhoto = true;
+        messageEl.innerText = "Augmented photo placed!";
+      }
+    }
+
+    // AR render loop.
+    function render(timestamp, frame) {
+      if (frame) {
+        const referenceSpace = renderer.xr.getReferenceSpace();
+        const session = renderer.xr.getSession();
+        if (!hitTestSourceRequested) {
+          session.requestReferenceSpace('viewer').then(refSpace => {
+            session.requestHitTestSource({ space: refSpace }).then(source => {
+              hitTestSource = source;
+            });
+          });
+          session.addEventListener('end', () => {
+            hitTestSourceRequested = false;
+            hitTestSource = null;
+          });
+          hitTestSourceRequested = true;
+        }
+        if (hitTestSource) {
+          const hitTestResults = frame.getHitTestResults(hitTestSource);
+          if (hitTestResults.length) {
+            const hit = hitTestResults[0];
+            reticle.visible = true;
+            reticle.matrix.fromArray(hit.getPose(referenceSpace).transform.matrix);
+            if (!placedAugmentedPhoto && augmentedTexture) {
+              messageEl.innerText = "Tap on a surface to place your augmented photo.";
+            }
+          } else {
+            reticle.visible = false;
+          }
+        }
+      }
+      renderer.render(scene, camera);
+    }
+
+    // ----------------------------
+    // Photo Upload and Processing
+    // ----------------------------
+    // When the user selects a file, process it.
+    fileInput.addEventListener("change", (event) => {
+      const file = event.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        const img = new Image();
+        img.onload = async () => {
+          // Create an offscreen canvas to process the photo.
+          const canvas = document.createElement("canvas");
+          canvas.width = img.width;
+          canvas.height = img.height;
+          const ctx = canvas.getContext("2d");
+          // Draw the uploaded photo.
+          ctx.drawImage(img, 0, 0);
+          
+          // Run face detection on the canvas using face-api.js.
+          // Use the TinyFaceDetector for fast processing.
+          const detections = await faceapi.detectAllFaces(canvas, new faceapi.TinyFaceDetectorOptions())
+                                        .withFaceLandmarks();
+          // For each detected face, draw fun overlays.
+          detections.forEach(det => {
+            const box = det.detection.box;
+            const landmarks = det.landmarks;
+            
+            // --- Draw Glasses Overlay ---
+            const leftEye = landmarks.getLeftEye();
+            const rightEye = landmarks.getRightEye();
+            // Compute centers of both eyes.
+            const leftCenter = {
+              x: leftEye.reduce((sum, pt) => sum + pt.x, 0) / leftEye.length,
+              y: leftEye.reduce((sum, pt) => sum + pt.y, 0) / leftEye.length
+            };
+            const rightCenter = {
+              x: rightEye.reduce((sum, pt) => sum + pt.x, 0) / rightEye.length,
+              y: rightEye.reduce((sum, pt) => sum + pt.y, 0) / rightEye.length
+            };
+            // Determine distance between eyes.
+            const eyeDist = Math.hypot(rightCenter.x - leftCenter.x, rightCenter.y - leftCenter.y);
+            ctx.strokeStyle = "red";
+            ctx.lineWidth = 5;
+            ctx.beginPath();
+            ctx.arc(leftCenter.x, leftCenter.y, eyeDist / 2.5, 0, 2 * Math.PI);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.arc(rightCenter.x, rightCenter.y, eyeDist / 2.5, 0, 2 * Math.PI);
+            ctx.stroke();
+
+            // --- Draw Hat Overlay ---
+            // Draw a triangle above the face box.
+            ctx.fillStyle = "blue";
+            const hatHeight = box.height * 0.6;
+            const hatWidth = box.width * 1.2;
+            const centerX = box.x + box.width / 2;
+            const topY = box.y - hatHeight;
+            ctx.beginPath();
+            ctx.moveTo(centerX, topY);
+            ctx.lineTo(centerX - hatWidth / 2, box.y);
+            ctx.lineTo(centerX + hatWidth / 2, box.y);
+            ctx.closePath();
+            ctx.fill();
+          });
+          
+          // Create a Three.js texture from the augmented canvas.
+          augmentedTexture = new THREE.CanvasTexture(canvas);
+          // Hide the upload UI as we're done.
+          uploadUI.style.display = "none";
+          messageEl.innerText = "Augmented photo ready. Enter AR mode and tap on a surface to place it.";
+        };
+        img.src = e.target.result;
+      };
+      reader.readAsDataURL(file);
     });
 
-    // Load face-api.js models from the hosted directory.
-    // The models here are loaded from a publicly available GitHub Pages repo.
+    // ----------------------------
+    // Model Loading for Face Detection
+    // ----------------------------
+    // Load models from a public repository.
     Promise.all([
       faceapi.nets.tinyFaceDetector.loadFromUri("https://justadudewhohacks.github.io/face-api.js/models/"),
       faceapi.nets.faceLandmark68Net.loadFromUri("https://justadudewhohacks.github.io/face-api.js/models/")
-    ]).then(startVideo);
-
-    // Start the video stream from the default camera.
-    function startVideo() {
-      navigator.mediaDevices.getUserMedia({ video: {} })
-        .then((stream) => { video.srcObject = stream; })
-        .catch(err => console.error("Error accessing webcam:", err));
-    }
-
-    // Main render loop: detect faces and draw filters if enabled.
-    video.addEventListener("play", () => {
-      async function onPlay() {
-        if (video.paused || video.ended)
-          return setTimeout(() => onPlay(), 100);
-
-        // Run face detection with the tiny face detector and get landmarks.
-        const detections = await faceapi.detectAllFaces(video, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks();
-
-        // Clear the canvas for this frame.
-        context.clearRect(0, 0, canvas.width, canvas.height);
-
-        // For each detection, apply the appropriate overlay if any.
-        detections.forEach(detection => {
-          if (currentMode === "glasses") {
-            drawGlasses(detection);
-          } else if (currentMode === "hat") {
-            drawHat(detection);
-          }
-        });
-
-        requestAnimationFrame(onPlay);
-      }
-      onPlay();
+    ]).then(() => {
+      console.log("Face detection models loaded.");
     });
 
-    // Draw glasses overlay on detected face based on eye landmarks.
-    function drawGlasses(detection) {
-      const landmarks = detection.landmarks;
-      const leftEye = landmarks.getLeftEye();
-      const rightEye = landmarks.getRightEye();
-
-      // Calculate the center of each eye.
-      const leftEyeCenter = leftEye.reduce((sum, pt) => ({ x: sum.x + pt.x, y: sum.y + pt.y }), { x: 0, y: 0 });
-      leftEyeCenter.x /= leftEye.length;
-      leftEyeCenter.y /= leftEye.length;
-      const rightEyeCenter = rightEye.reduce((sum, pt) => ({ x: sum.x + pt.x, y: sum.y + pt.y }), { x: 0, y: 0 });
-      rightEyeCenter.x /= rightEye.length;
-      rightEyeCenter.y /= rightEye.length;
-
-      // Compute the distance between the eyes.
-      const dx = rightEyeCenter.x - leftEyeCenter.x;
-      const dy = rightEyeCenter.y - leftEyeCenter.y;
-      const eyeDistance = Math.sqrt(dx * dx + dy * dy);
-
-      // Draw two circles over the eyes.
-      context.strokeStyle = "cyan";
-      context.lineWidth = 4;
-      context.beginPath();
-      context.arc(leftEyeCenter.x, leftEyeCenter.y, eyeDistance / 2.5, 0, 2 * Math.PI);
-      context.stroke();
-
-      context.beginPath();
-      context.arc(rightEyeCenter.x, rightEyeCenter.y, eyeDistance / 2.5, 0, 2 * Math.PI);
-      context.stroke();
-
-      // Draw a connecting line between the eyes.
-      context.beginPath();
-      context.moveTo(leftEyeCenter.x, leftEyeCenter.y);
-      context.lineTo(rightEyeCenter.x, rightEyeCenter.y);
-      context.stroke();
-    }
-
-    // Draw a hat overlay using the face detection bounding box.
-    function drawHat(detection) {
-      const box = detection.detection.box;
-      // Define hat dimensions relative to the face box.
-      const hatHeight = box.height * 0.6;
-      const hatWidth = box.width * 1.2;
-      const centerX = box.x + box.width / 2;
-      const bottomY = box.y;
-      const topY = box.y - hatHeight;
-
-      // Draw a triangle for the hat.
-      context.fillStyle = "magenta";
-      context.beginPath();
-      context.moveTo(centerX, topY);              // Tip of the hat
-      context.lineTo(centerX - hatWidth / 2, bottomY); // Bottom-left corner
-      context.lineTo(centerX + hatWidth / 2, bottomY); // Bottom-right corner
-      context.closePath();
-      context.fill();
-
-      // Optionally, add a brim to the hat.
-      context.fillStyle = "black";
-      context.fillRect(centerX - hatWidth / 2, bottomY - 5, hatWidth, 10);
-    }
+    // ----------------------------
+    // Initialize AR after page load
+    // ----------------------------
+    window.addEventListener("load", () => {
+      // Show file input until the user uploads a photo.
+      uploadUI.style.display = "block";
+      messageEl.innerText = "Upload a group photo to begin.";
+      initAR();
+    });
   </script>
 </body>
 </html>
