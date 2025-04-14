@@ -2,64 +2,131 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Markerless AR App</title>
+  <title>AR Tap Game</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <style>
-    /* Basic CSS: remove default margins, set full-screen canvas, and style an on-screen info element */
+    /* Base styles: full-window canvas and styled HUD */
     body {
       margin: 0;
       overflow: hidden;
       font-family: sans-serif;
     }
-    #info {
+    /* Heads-up display for score and timer */
+    #hud {
       position: absolute;
       top: 10px;
-      width: 100%;
-      text-align: center;
+      left: 10px;
       color: #fff;
+      z-index: 2;
       font-size: 1.2em;
-      z-index: 1;
-      pointer-events: none;
+      background: rgba(0, 0, 0, 0.5);
+      padding: 5px 10px;
+      border-radius: 5px;
+    }
+    /* Message displayed during setup */
+    #message {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      color: #fff;
+      font-size: 1.5em;
+      z-index: 2;
+      text-align: center;
+      background: rgba(0,0,0,0.6);
+      padding: 10px 20px;
+      border-radius: 5px;
+    }
+    /* Game over dialog */
+    #gameOver {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      color: #fff;
+      font-size: 1.5em;
+      z-index: 2;
+      text-align: center;
+      background: rgba(0,0,0,0.8);
+      padding: 20px;
+      border-radius: 10px;
+      display: none;
+    }
+    button {
+      font-size: 1em;
+      padding: 10px 20px;
+      margin-top: 10px;
     }
   </style>
 </head>
 <body>
-  <div id="info">Tap the screen to place an object in AR!</div>
+  <!-- Heads-up display -->
+  <div id="hud">
+    <div id="score">Score: 0</div>
+    <div id="timer">Time: 60</div>
+  </div>
+  <!-- Setup message: instructs the user to tap on a detected surface -->
+  <div id="message">Tap on a detected surface to place the game board!</div>
+  <!-- Game over dialog with restart button -->
+  <div id="gameOver">
+    Game Over!<br/>
+    Final Score: <span id="finalScore"></span><br/>
+    <button id="restartButton">Restart</button>
+  </div>
 
-  <!-- We use ES modules to import Three.js and ARButton from a CDN -->
+  <!-- Main AR game code: uses Three.js and ARButton (all code in one file) -->
   <script type="module">
+    // Import Three.js and ARButton as ES modules from a CDN.
     import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.146.0/build/three.module.js';
     import { ARButton } from 'https://cdn.jsdelivr.net/npm/three@0.146.0/examples/jsm/webxr/ARButton.js';
 
+    // Core Three.js variables
     let camera, scene, renderer;
     let controller;
     let reticle;
     let hitTestSource = null;
     let hitTestSourceRequested = false;
 
+    // -------------------------------
+    // Game Variables and State
+    // -------------------------------
+    // Game states: "setup" (waiting for anchor), "playing", or "over"
+    let gameState = "setup";
+    // The game board’s anchor is set when the user taps on a detected surface.
+    let gameAnchor = new THREE.Vector3();
+    let gameStartTime = 0;
+    const gameDuration = 60; // game length in seconds
+    let score = 0;
+    let targets = []; // array to hold spawned target objects
+    let spawnInterval = null;
+    const targetLifetime = 3000; // targets last 3 seconds if not hit
+
+    // Raycaster for shooting (detecting target hits)
+    const raycaster = new THREE.Raycaster();
+
+    // Initialize the scene and start the animation loop.
     init();
     animate();
 
     function init() {
-      // Create the scene
+      // Create our scene and camera.
       scene = new THREE.Scene();
 
-      // Set up a perspective camera
       camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
 
-      // Configure the renderer with transparency and enable XR support
+      // Create the WebGL renderer with transparency and XR support.
       renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
       renderer.setPixelRatio(window.devicePixelRatio);
       renderer.setSize(window.innerWidth, window.innerHeight);
       renderer.xr.enabled = true;
       document.body.appendChild(renderer.domElement);
 
-      // Add a light source for the 3D objects
+      // Lighting so our game objects are visible.
       const light = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1);
       light.position.set(0.5, 1, 0.25);
       scene.add(light);
 
-      // Create a reticle that will show where the app detects surfaces via hit testing
+      // Create a reticle (ring) that shows where surfaces are detected.
       reticle = new THREE.Mesh(
         new THREE.RingGeometry(0.15, 0.2, 32).rotateX(-Math.PI / 2),
         new THREE.MeshBasicMaterial({ color: 0x00ff00 })
@@ -68,79 +135,172 @@
       reticle.visible = false;
       scene.add(reticle);
 
-      // Setup a controller for user input (tap to place objects)
+      // Set up the controller to listen for tap/select events.
       controller = renderer.xr.getController(0);
       controller.addEventListener('select', onSelect);
       scene.add(controller);
 
-      // Add an AR button to start the AR session with hit-test capability
+      // Add the AR button to kick off the immersive session.
       document.body.appendChild(ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] }));
 
-      // Handle window resize events
+      // Listen for window resizes.
       window.addEventListener('resize', onWindowResize, false);
+
+      // Restart game when the button is pressed.
+      document.getElementById('restartButton').addEventListener('click', () => {
+        // A simple way to reset the game: reload the page.
+        window.location.reload();
+      });
     }
 
-    // Handler for the “select” event (user taps the screen)
+    // Handler for controller “select” events (i.e. user taps the screen).
     function onSelect() {
-      if (reticle.visible) {
-        // Create a small cube with a random color at the reticle's position
-        const geometry = new THREE.BoxGeometry(0.1, 0.1, 0.1);
-        const material = new THREE.MeshPhongMaterial({ color: Math.random() * 0xffffff });
-        const mesh = new THREE.Mesh(geometry, material);
-        mesh.position.setFromMatrixPosition(reticle.matrix);
-        // Optional: vary the cube's height for extra fun
-        mesh.scale.y = Math.random() * 2 + 1;
-        scene.add(mesh);
+      if (gameState === "setup") {
+        // In setup mode, tap places the game board at the reticle’s position.
+        if (reticle.visible) {
+          gameAnchor.setFromMatrixPosition(reticle.matrix);
+          startGame();
+        }
+      } else if (gameState === "playing") {
+        // In gameplay, tap to shoot targets.
+        // Cast a ray from the center of the screen.
+        const tapPos = new THREE.Vector2(0, 0); // Center of view.
+        raycaster.setFromCamera(tapPos, camera);
+        const intersects = raycaster.intersectObjects(targets);
+        if (intersects.length > 0) {
+          // A target was hit.
+          let hitTarget = intersects[0].object;
+          scene.remove(hitTarget);
+          targets = targets.filter(obj => obj !== hitTarget);
+          score++;
+          updateHUD();
+        }
       }
     }
 
-    // Adjust camera and renderer on window resize
+    // Called when the game board is placed.
+    function startGame() {
+      gameState = "playing";
+      gameStartTime = performance.now();
+      // Clear the setup message.
+      document.getElementById('message').innerText = '';
+      // Hide the reticle as we no longer need it.
+      reticle.visible = false;
+      // Begin spawning targets every 1.5 seconds.
+      spawnInterval = setInterval(spawnTarget, 1500);
+      updateHUD();
+    }
+
+    // Spawn a target (a little colored sphere) randomly near the game board.
+    function spawnTarget() {
+      if (gameState !== "playing") return;
+      const geometry = new THREE.SphereGeometry(0.07, 16, 16);
+      const material = new THREE.MeshPhongMaterial({ color: Math.random() * 0xffffff });
+      const target = new THREE.Mesh(geometry, material);
+      // Random offset within roughly 1 meter of the game anchor.
+      const offsetX = (Math.random() - 0.5) * 1.0;
+      const offsetZ = (Math.random() - 0.5) * 1.0;
+      target.position.set(gameAnchor.x + offsetX, gameAnchor.y, gameAnchor.z + offsetZ);
+      // Record when this target was spawned.
+      target.userData.spawnTime = performance.now();
+      scene.add(target);
+      targets.push(target);
+    }
+
+    // Update the HUD with the current score and remaining time.
+    function updateHUD() {
+      document.getElementById('score').innerText = `Score: ${score}`;
+      if (gameState === "playing") {
+        const elapsed = (performance.now() - gameStartTime) / 1000;
+        const remaining = Math.max(0, Math.floor(gameDuration - elapsed));
+        document.getElementById('timer').innerText = `Time: ${remaining}`;
+      }
+    }
+
+    // End the game (stop target spawning, show final score, etc.).
+    function endGame() {
+      gameState = "over";
+      stopSpawning();
+      // Remove any remaining targets.
+      targets.forEach(target => scene.remove(target));
+      targets = [];
+      // Display the game over dialog.
+      document.getElementById('gameOver').style.display = 'block';
+      document.getElementById('finalScore').innerText = score;
+    }
+
+    // Stop the interval that spawns targets.
+    function stopSpawning() {
+      if (spawnInterval) {
+        clearInterval(spawnInterval);
+        spawnInterval = null;
+      }
+    }
+
+    // Adjust camera settings when the window is resized.
     function onWindowResize() {
       camera.aspect = window.innerWidth / window.innerHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(window.innerWidth, window.innerHeight);
     }
 
-    // Start the rendering loop
+    // Start the rendering loop.
     function animate() {
       renderer.setAnimationLoop(render);
     }
 
-    // Render loop: perform hit testing on each frame
+    // Main render loop.
     function render(timestamp, frame) {
-      if (frame) {
-        const referenceSpace = renderer.xr.getReferenceSpace();
-        const session = renderer.xr.getSession();
+      // In setup mode, update the reticle position using hit testing.
+      if (gameState === "setup") {
+        if (frame) {
+          const referenceSpace = renderer.xr.getReferenceSpace();
+          const session = renderer.xr.getSession();
 
-        if (!hitTestSourceRequested) {
-          // Request hit-test source from the session, based on the viewer reference space
-          session.requestReferenceSpace('viewer').then((referenceSpace) => {
-            session.requestHitTestSource({ space: referenceSpace }).then((source) => {
-              hitTestSource = source;
+          if (!hitTestSourceRequested) {
+            session.requestReferenceSpace('viewer').then((refSpace) => {
+              session.requestHitTestSource({ space: refSpace }).then((source) => {
+                hitTestSource = source;
+              });
             });
-          });
 
-          session.addEventListener('end', () => {
-            hitTestSourceRequested = false;
-            hitTestSource = null;
-          });
+            session.addEventListener('end', () => {
+              hitTestSourceRequested = false;
+              hitTestSource = null;
+            });
 
-          hitTestSourceRequested = true;
-        }
+            hitTestSourceRequested = true;
+          }
 
-        if (hitTestSource) {
-          const hitTestResults = frame.getHitTestResults(hitTestSource);
-          if (hitTestResults.length) {
-            // Use the first hit result to update the reticle's position
-            const hit = hitTestResults[0];
-            reticle.visible = true;
-            reticle.matrix.fromArray(hit.getPose(referenceSpace).transform.matrix);
-          } else {
-            reticle.visible = false;
+          if (hitTestSource) {
+            const hitTestResults = frame.getHitTestResults(hitTestSource);
+            if (hitTestResults.length) {
+              const hit = hitTestResults[0];
+              reticle.visible = true;
+              reticle.matrix.fromArray(hit.getPose(referenceSpace).transform.matrix);
+            } else {
+              reticle.visible = false;
+            }
           }
         }
+      } else if (gameState === "playing") {
+        // Update the timer in the HUD.
+        const elapsed = (performance.now() - gameStartTime) / 1000;
+        updateHUD();
+        // End the game if time is up.
+        if (elapsed >= gameDuration) {
+          endGame();
+        }
+        // Remove targets that have been around longer than their lifetime.
+        const now = performance.now();
+        targets = targets.filter(target => {
+          if (now - target.userData.spawnTime > targetLifetime) {
+            scene.remove(target);
+            return false;
+          }
+          return true;
+        });
       }
-
       renderer.render(scene, camera);
     }
   </script>
