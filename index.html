@@ -2,390 +2,342 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>AR Home Assistant</title>
+  <title>AR Sticky Notes & Measurement</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <style>
-    /* Basic reset and full-screen canvas */
+    /* Full-screen canvas, basic reset and background */
     body {
       margin: 0;
       overflow: hidden;
       font-family: sans-serif;
-      background: #111;
-      color: #eee;
+      background: #000;
     }
-    /* Instructional overlay */
-    #message {
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      transform: translate(-50%, -50%);
-      background: rgba(0, 0, 0, 0.75);
-      padding: 20px 30px;
-      border-radius: 10px;
-      font-size: 1.2em;
-      z-index: 2;
-      text-align: center;
-    }
-    /* HUD to display current mode */
-    #hud {
-      position: absolute;
+    /* UI overlay: buttons in top-right corner */
+    #ui {
+      position: fixed;
       top: 10px;
-      left: 10px;
-      background: rgba(0,0,0,0.6);
+      right: 10px;
+      z-index: 2;
+      background: rgba(0, 0, 0, 0.5);
+      padding: 10px;
+      border-radius: 5px;
+    }
+    #ui button {
+      font-size: 14px;
+      margin: 5px;
+      padding: 5px 10px;
+      cursor: pointer;
+    }
+    /* Instruction text at the bottom-center */
+    #instructions {
+      position: fixed;
+      bottom: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 2;
+      background: rgba(0, 0, 0, 0.5);
+      color: #fff;
       padding: 8px 12px;
       border-radius: 5px;
-      font-size: 1em;
-      z-index: 2;
+      font-size: 14px;
     }
   </style>
 </head>
 <body>
-  <!-- Instruction message overlay -->
-  <div id="message">Tap on a detected surface to place your AR Home Hub</div>
-  <!-- Heads-up display (HUD) -->
-  <div id="hud">Mode: Setup</div>
+  <!-- UI overlay with mode buttons -->
+  <div id="ui">
+    <button id="addModeButton">Add Note</button>
+    <button id="measureModeButton">Measure</button>
+    <button id="clearButton">Clear All</button>
+  </div>
+  <div id="instructions">Mode: Add Note. Tap on a surface to place a sticky note.</div>
 
-  <!-- Main AR Home Assistant app code -->
+  <!-- Main AR App code -->
   <script type="module">
-    /**********************************************************************
-     * AR Home Assistant – A Markerless AR Assistive Application
-     *
-     * This app is aimed at providing an interactive AR interface that helps
-     * elderly users (or any user) access daily schedule info, medication
-     * reminders, and emergency contacts. Once a flat surface is detected, you
-     * tap to “anchor” your personal hub. Around that hub, several interactive 
-     * panels (cards) appear and always face the viewer. Tap on a panel to 
-     * toggle between a quick glance (collapsed) and a more detailed view.
-     *
-     * All assets are loaded via CDN. Deploy this file to GitHub Pages (via HTTPS)
-     * and test on a WebXR‑compatible device (for example, Chrome on Android).
-     **********************************************************************/
-
-    // Import Three.js and ARButton from CDN:
+    // Import Three.js and ARButton as ES modules from a CDN
     import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.146.0/build/three.module.js';
     import { ARButton } from 'https://cdn.jsdelivr.net/npm/three@0.146.0/examples/jsm/webxr/ARButton.js';
 
-    // -------------------------------
-    // Global Variables & App State
-    // -------------------------------
+    // Global variables and state
     let scene, camera, renderer, controller, reticle;
     let hitTestSource = null;
     let hitTestSourceRequested = false;
 
-    // Our two main modes: "setup" (waiting for user to anchor the hub)
-    // and "service" (the AR home hub with interactive panels)
-    let appState = "setup";
-    // The hub’s anchor position (set after the user selects a hit-test point)
-    const hubAnchor = new THREE.Vector3();
+    // Two primary modes: "add" (to pin a sticky note) and "measure" (to select notes and measure distance)
+    let currentMode = "add";
+    // Array of placed sticky notes
+    let stickyNotes = [];
+    let noteCount = 0;
+    // When two notes are selected in measure mode, a sprite shows the measured distance
+    let measureSprite = null;
+    const raycaster = new THREE.Raycaster();
 
-    // Panels array will hold our interactive panel objects
-    const panels = [];
+    // UI elements
+    const addModeButton = document.getElementById('addModeButton');
+    const measureModeButton = document.getElementById('measureModeButton');
+    const clearButton = document.getElementById('clearButton');
+    const instructionsEl = document.getElementById('instructions');
 
-    // Reference to the HUD and message DOM elements for instructions
-    const hudEl = document.getElementById('hud');
-    const messageEl = document.getElementById('message');
-
-    // -------------------------------
-    // Interactive Panel Class
-    // -------------------------------
-    class InteractivePanel {
-      /**
-       * id: Unique identifier for the panel.
-       * title: Panel title.
-       * collapsedContent: Array of text lines to show in collapsed mode.
-       * expandedContent: Array of text lines for expanded (detailed) mode.
-       */
-      constructor(id, title, collapsedContent, expandedContent) {
-        this.id = id;
-        this.title = title;
-        this.collapsedContent = collapsedContent;
-        this.expandedContent = expandedContent;
-        this.expanded = false;  // Initial state: collapsed
-
-        // Dimensions of panel (in AR meters)
-        this.width = 0.5;
-        this.height = 0.3;
-
-        // Create an offscreen canvas to draw the panel’s content.
-        this.canvas = document.createElement('canvas');
-        this.canvas.width = 512;
-        this.canvas.height = 256;
-        this.context = this.canvas.getContext('2d');
-
-        // Create texture from canvas and set material (DoubleSide allows viewing from both faces)
-        this.texture = new THREE.CanvasTexture(this.canvas);
-        this.material = new THREE.MeshBasicMaterial({
-          map: this.texture,
-          side: THREE.DoubleSide,
-          transparent: true
-        });
-
-        // Create a plane geometry using the provided dimensions.
-        this.geometry = new THREE.PlaneGeometry(this.width, this.height);
-        this.mesh = new THREE.Mesh(this.geometry, this.material);
-
-        // Update the canvas with the initial (collapsed) view.
-        this.updatePanel();
-      }
-
-      // Redraws the canvas content based on the current state.
-      updatePanel() {
-        const ctx = this.context;
-        // Clear the canvas.
-        ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-        // Draw a semi‐transparent background.
-        ctx.fillStyle = 'rgba(0, 100, 150, 0.8)';
-        ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
-        // Draw the title.
-        ctx.fillStyle = '#fff';
-        ctx.font = 'bold 36px sans-serif';
-        ctx.fillText(this.title, 20, 50);
-        // Underline the title.
-        ctx.strokeStyle = '#fff';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.moveTo(20, 60);
-        ctx.lineTo(this.canvas.width - 20, 60);
-        ctx.stroke();
-        // Draw content lines.
-        ctx.font = '28px sans-serif';
-        const lines = this.expanded ? this.expandedContent : this.collapsedContent;
-        let startY = 100;
-        for (let line of lines) {
-          ctx.fillText(line, 20, startY);
-          startY += 40;
+    // Set up UI button event listeners
+    addModeButton.addEventListener('click', () => {
+      currentMode = "add";
+      instructionsEl.innerText = "Mode: Add Note. Tap on a surface to place a sticky note.";
+      // Deselect all notes (if any) and remove a measurement if present.
+      stickyNotes.forEach(note => {
+        if(note.selected) {
+          note.selected = false;
+          note.update();
         }
-        // Draw a hint at the bottom.
-        ctx.font = '24px sans-serif';
-        ctx.fillStyle = '#ff0';
-        const hint = this.expanded ? 'Tap to collapse' : 'Tap to expand';
-        ctx.fillText(hint, 20, this.canvas.height - 20);
-        // Mark the texture for update.
-        this.texture.needsUpdate = true;
-      }
-
-      // Toggle between collapsed and expanded modes.
-      toggle() {
-        this.expanded = !this.expanded;
-        this.updatePanel();
-      }
-    }
-
-    // -------------------------------
-    // Create and Position Panels
-    // -------------------------------
-    function createPanels() {
-      // Create sample panels with demo content.
-
-      // 1. Daily Schedule Panel.
-      panels.push(new InteractivePanel(
-        'schedule',
-        'Daily Schedule',
-        [
-          '9:00 AM - Breakfast',
-          '10:30 AM - Doctor'
-        ],
-        [
-          'Breakfast: 9:00 AM in Dining Room',
-          'Doctor Appointment: 10:30 AM, Room 207',
-          '11:30 AM - Light Exercise',
-          '2:00 PM - Reading'
-        ]
-      ));
-
-      // 2. Medication Reminder Panel.
-      panels.push(new InteractivePanel(
-        'medication',
-        'Medication',
-        [
-          '8:00 AM - BP Med',
-          '8:00 PM - Cholesterol'
-        ],
-        [
-          '8:00 AM: Take 1 pill of Blood Pressure Med',
-          '8:00 PM: Take 1 pill of Cholesterol Med'
-        ]
-      ));
-
-      // 3. Emergency Contacts Panel.
-      panels.push(new InteractivePanel(
-        'contacts',
-        'Emergency Contacts',
-        [
-          'Alice: 555-1234',
-          'Bob: 555-5678'
-        ],
-        [
-          'Alice (Daughter): 555-1234',
-          'Bob (Neighbor): 555-5678',
-          'Charlie (Doctor): 555-9012'
-        ]
-      ));
-
-      // Position each panel in an arc around the hub.
-      // For three panels, we’ll place them at –30°, 0°, and +30° at 0.8m away, and 0.8m high.
-      const numPanels = panels.length;
-      const radius = 0.8;  // meters from hub
-      const baseY = hubAnchor.y + 0.8;  // vertically offset from hub anchor
-
-      // Angles in radians: -30°, 0°, +30°.
-      const angles = [ -Math.PI / 6, 0, Math.PI / 6 ];
-      panels.forEach((panel, i) => {
-        const angle = angles[i];
-        panel.mesh.position.set(
-          hubAnchor.x + radius * Math.sin(angle),
-          baseY,
-          hubAnchor.z + radius * Math.cos(angle)
-        );
-        // Optionally, give a slight initial rotation.
-        panel.mesh.rotation.y = angle;
-        scene.add(panel.mesh);
       });
+      removeMeasureSprite();
+    });
+    measureModeButton.addEventListener('click', () => {
+      currentMode = "measure";
+      instructionsEl.innerText = "Mode: Measure. Tap on sticky notes to select them for measurement.";
+      stickyNotes.forEach(note => {
+        if(note.selected) {
+          note.selected = false;
+          note.update();
+        }
+      });
+      removeMeasureSprite();
+    });
+    clearButton.addEventListener('click', () => {
+      // Remove all sticky notes and the measure sprite from the scene.
+      stickyNotes.forEach(note => {
+        scene.remove(note.mesh);
+      });
+      stickyNotes = [];
+      noteCount = 0;
+      removeMeasureSprite();
+    });
+
+    // Utility: remove the measure sprite if it exists.
+    function removeMeasureSprite() {
+      if(measureSprite) {
+        scene.remove(measureSprite);
+        measureSprite = null;
+      }
     }
 
-    // -------------------------------
-    // Initialize Three.js & AR Components
-    // -------------------------------
+    // Create a sticky note at a given position with preset text.
+    function createStickyNote(position, text) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 256;
+      canvas.height = 256;
+      const ctx = canvas.getContext('2d');
+      
+      // Function to draw the sticky note, using different styles if selected.
+      function drawNote(selected) {
+        // Background: a typical sticky-note yellow tint.
+        ctx.fillStyle = selected ? '#fffa90' : '#fff8c6';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        // Border: thicker red when selected, thinner yellow otherwise.
+        ctx.strokeStyle = selected ? '#ff0000' : '#cccc00';
+        ctx.lineWidth = selected ? 8 : 4;
+        ctx.strokeRect(0, 0, canvas.width, canvas.height);
+        // Draw centered text.
+        ctx.font = '32px sans-serif';
+        ctx.fillStyle = '#000';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+      }
+      
+      drawNote(false);
+      
+      const texture = new THREE.CanvasTexture(canvas);
+      const material = new THREE.MeshBasicMaterial({ map: texture, side: THREE.DoubleSide });
+      const geometry = new THREE.PlaneGeometry(0.3, 0.3);
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.position.copy(position);
+      
+      return {
+        id: noteCount++,
+        text: text,
+        mesh: mesh,
+        selected: false,
+        canvas: canvas,
+        ctx: ctx,
+        texture: texture,
+        update: function() {
+          drawNote(this.selected);
+          this.texture.needsUpdate = true;
+        },
+        toggle: function() {
+          this.selected = !this.selected;
+          this.update();
+        }
+      };
+    }
+
+    // When exactly two notes are selected, update or create a sprite to show the distance.
+    function updateMeasurementDisplay() {
+      const selectedNotes = stickyNotes.filter(note => note.selected);
+      if (selectedNotes.length === 2) {
+        const pos1 = selectedNotes[0].mesh.position;
+        const pos2 = selectedNotes[1].mesh.position;
+        const distance = pos1.distanceTo(pos2);
+        const midPoint = new THREE.Vector3().addVectors(pos1, pos2).multiplyScalar(0.5);
+        const text = distance.toFixed(2) + " m";
+        if (!measureSprite) {
+          measureSprite = createTextSprite(text);
+          scene.add(measureSprite);
+        } else {
+          updateTextSprite(measureSprite, text);
+        }
+        measureSprite.position.copy(midPoint);
+      } else {
+        removeMeasureSprite();
+      }
+    }
+
+    // Create a sprite that displays text (used for distance measurement).
+    function createTextSprite(message) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 256;
+      canvas.height = 128;
+      const context = canvas.getContext('2d');
+      context.fillStyle = "rgba(255,255,255,0.8)";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.font = "48px sans-serif";
+      context.fillStyle = "#000";
+      context.textAlign = "center";
+      context.textBaseline = "middle";
+      context.fillText(message, canvas.width / 2, canvas.height / 2);
+      
+      const texture = new THREE.CanvasTexture(canvas);
+      const spriteMaterial = new THREE.SpriteMaterial({ map: texture });
+      const sprite = new THREE.Sprite(spriteMaterial);
+      sprite.scale.set(0.5, 0.25, 1);
+      sprite.userData = { canvas: canvas, context: context, texture: texture };
+      return sprite;
+    }
+
+    // Update an existing measurement sprite with new text.
+    function updateTextSprite(sprite, message) {
+      const canvas = sprite.userData.canvas;
+      const context = sprite.userData.context;
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      context.fillStyle = "rgba(255,255,255,0.8)";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.font = "48px sans-serif";
+      context.fillStyle = "#000";
+      context.textAlign = "center";
+      context.textBaseline = "middle";
+      context.fillText(message, canvas.width / 2, canvas.height / 2);
+      sprite.userData.texture.needsUpdate = true;
+    }
+
+    // Three.js / WebXR initialization
     function init() {
-      // Create our Three.js scene.
       scene = new THREE.Scene();
-
-      // Setup camera.
-      camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
-
-      // Configure renderer with transparency and XR support.
+      camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.01, 20);
       renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
       renderer.setPixelRatio(window.devicePixelRatio);
       renderer.setSize(window.innerWidth, window.innerHeight);
       renderer.xr.enabled = true;
       document.body.appendChild(renderer.domElement);
 
-      // Add a basic hemisphere light.
       const light = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1);
       light.position.set(0.5, 1, 0.25);
       scene.add(light);
 
-      // Create a reticle – used in setup mode for hit testing.
+      // Create a reticle using a ring geometry—this shows where AR hit testing finds surfaces.
       reticle = new THREE.Mesh(
-        new THREE.RingGeometry(0.15, 0.2, 32).rotateX(-Math.PI / 2),
+        new THREE.RingGeometry(0.15, 0.2, 32).rotateX(-Math.PI/2),
         new THREE.MeshBasicMaterial({ color: 0x00ff00 })
       );
       reticle.matrixAutoUpdate = false;
       reticle.visible = false;
       scene.add(reticle);
 
-      // Create a controller to listen for “select” (tap) events.
+      // Set up the controller to listen for tap/select events.
       controller = renderer.xr.getController(0);
       controller.addEventListener('select', onSelect);
       scene.add(controller);
 
-      // Add the ARButton to start the AR session (requires hit-test feature).
+      // Add ARButton to enter AR mode.
       document.body.appendChild(ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] }));
 
-      // Handle window resize.
       window.addEventListener('resize', onWindowResize, false);
     }
 
-    // -------------------------------
-    // Handle Controller Tap Events
-    // -------------------------------
-    function onSelect() {
-      if (appState === "setup") {
-        // In setup mode, if the reticle is visible, anchor the hub.
-        if (reticle.visible) {
-          reticle.matrix.decompose(hubAnchor, new THREE.Quaternion(), new THREE.Vector3());
-          // Hide the instruction message.
-          messageEl.innerText = 'AR Home Hub anchored. Tap on panels for details.';
-          // Update HUD.
-          hudEl.innerText = 'Mode: Home Hub';
-
-          // Create interactive panels relative to the hub anchor.
-          createPanels();
-
-          // Switch to service mode.
-          appState = "service";
-        }
-      } else if (appState === "service") {
-        // In service mode, cast a ray from the center to detect panel taps.
-        const tapPos = new THREE.Vector2(0, 0); // center of the view
-        const raycaster = new THREE.Raycaster();
-        raycaster.setFromCamera(tapPos, camera);
-        // Create an array of panel meshes for intersection.
-        const panelMeshes = panels.map(panel => panel.mesh);
-        const intersects = raycaster.intersectObjects(panelMeshes);
-        if (intersects.length > 0) {
-          // Toggle the first panel that was hit.
-          const hitMesh = intersects[0].object;
-          // Find the matching panel and toggle it.
-          panels.forEach(panel => {
-            if (panel.mesh === hitMesh) {
-              panel.toggle();
-            }
-          });
-        }
-      }
-    }
-
-    // -------------------------------
-    // Window Resize Handler
-    // -------------------------------
+    // Handle window resize events.
     function onWindowResize() {
-      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.aspect = window.innerWidth/window.innerHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(window.innerWidth, window.innerHeight);
     }
 
-    // -------------------------------
-    // Animation Loop
-    // -------------------------------
-    let lastFrameTime = performance.now();
+    // Controller tap/select event handler.
+    function onSelect() {
+      if (currentMode === "add") {
+        // In "add" mode, if the reticle is visible, create a new sticky note at that location.
+        if (reticle.visible) {
+          const pos = new THREE.Vector3();
+          reticle.matrix.decompose(pos, new THREE.Quaternion(), new THREE.Vector3());
+          const note = createStickyNote(pos, "Note " + (noteCount + 1));
+          stickyNotes.push(note);
+          scene.add(note.mesh);
+        }
+      } else if (currentMode === "measure") {
+        // In "measure" mode, cast a ray from the center of the screen to detect sticky notes.
+        const tapPos = new THREE.Vector2(0, 0);  // center of the view
+        raycaster.setFromCamera(tapPos, camera);
+        const objects = stickyNotes.map(note => note.mesh);
+        const intersects = raycaster.intersectObjects(objects);
+        if(intersects.length > 0) {
+          // Toggle selection on the intersected note.
+          const hitMesh = intersects[0].object;
+          const note = stickyNotes.find(n => n.mesh === hitMesh);
+          if(note) {
+            note.toggle();
+            updateMeasurementDisplay();
+          }
+        }
+      }
+    }
+
+    // Animation loop: update hit testing and orient notes to face the camera.
     function animate() {
       renderer.setAnimationLoop(render);
     }
 
     function render(timestamp, frame) {
-      // In setup mode, update the reticle using hit testing.
-      if (appState === "setup") {
-        if (frame) {
-          const referenceSpace = renderer.xr.getReferenceSpace();
-          const session = renderer.xr.getSession();
-          if (!hitTestSourceRequested) {
-            session.requestReferenceSpace('viewer').then(refSpace => {
-              session.requestHitTestSource({ space: refSpace }).then(source => {
-                hitTestSource = source;
-              });
+      if (frame) {
+        const referenceSpace = renderer.xr.getReferenceSpace();
+        const session = renderer.xr.getSession();
+        if (!hitTestSourceRequested) {
+          session.requestReferenceSpace('viewer').then(refSpace => {
+            session.requestHitTestSource({ space: refSpace }).then(source => {
+              hitTestSource = source;
             });
-            session.addEventListener('end', () => {
-              hitTestSourceRequested = false;
-              hitTestSource = null;
-            });
-            hitTestSourceRequested = true;
-          }
-          if (hitTestSource) {
-            const hitTestResults = frame.getHitTestResults(hitTestSource);
-            if (hitTestResults.length) {
-              const hit = hitTestResults[0];
-              reticle.visible = true;
-              reticle.matrix.fromArray(hit.getPose(referenceSpace).transform.matrix);
-            } else {
-              reticle.visible = false;
-            }
+          });
+          session.addEventListener('end', () => {
+            hitTestSourceRequested = false;
+            hitTestSource = null;
+          });
+          hitTestSourceRequested = true;
+        }
+        if (hitTestSource) {
+          const hitTestResults = frame.getHitTestResults(hitTestSource);
+          if (hitTestResults.length) {
+            const hit = hitTestResults[0];
+            reticle.visible = true;
+            reticle.matrix.fromArray(hit.getPose(referenceSpace).transform.matrix);
+          } else {
+            reticle.visible = false;
           }
         }
-      } else if (appState === "service") {
-        // In service mode, update each panel so that it always faces the camera.
-        panels.forEach(panel => {
-          // Make the panel “billboard” toward the camera.
-          panel.mesh.lookAt(camera.position);
-        });
       }
+      // Ensure sticky notes always face the user.
+      stickyNotes.forEach(note => {
+        note.mesh.lookAt(camera.position);
+      });
       renderer.render(scene, camera);
-      lastFrameTime = timestamp;
     }
 
-    // -------------------------------
-    // Initialize and Start the App
-    // -------------------------------
     init();
     animate();
   </script>
