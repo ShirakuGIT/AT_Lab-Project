@@ -1,71 +1,131 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Simple Markerless AR App</title>
-  <!-- Three.js and WebXR ARButton -->
-  <script type="module">
-    import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.152.2/build/three.module.js';
-    import { ARButton } from 'https://cdn.jsdelivr.net/npm/three@0.152.2/examples/jsm/webxr/ARButton.js';
-
+  <meta charset="UTF-8" />
+  <title>AR Tape Measure</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <style>
+    body { margin: 0; overflow: hidden; }
+    #reset {
+      position: absolute;
+      top: 10px; left: 10px;
+      padding: 10px 15px;
+      background: rgba(0,0,0,0.5);
+      color: white;
+      font-size: 16px;
+      border: none;
+      border-radius: 5px;
+      z-index: 2;
+    }
+  </style>
+</head>
+<body>
+  <button id="reset">Reset</button>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.141.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.141.0/examples/js/webxr/ARButton.js"></script>
+  <script>
     let camera, scene, renderer;
     let controller;
-    let reticle;
-    let hitTestSource = null;
-    let hitTestSourceRequested = false;
+    let reticle, hitTestSource = null, hitTestSourceRequested = false;
+    const points = [], markers = [], lines = [], sprites = [];
 
     init();
     animate();
 
     function init() {
-      const container = document.createElement('div');
-      document.body.appendChild(container);
-
+      // basic scene + camera + renderer
       scene = new THREE.Scene();
-
-      camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
-
+      camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.01, 20);
       renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-      renderer.setPixelRatio(window.devicePixelRatio);
       renderer.setSize(window.innerWidth, window.innerHeight);
       renderer.xr.enabled = true;
-      container.appendChild(renderer.domElement);
+      document.body.appendChild(renderer.domElement);
 
-      document.body.appendChild(
-        ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] })
-      );
+      // AR button
+      document.body.appendChild(ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] }));
 
-      // Controller for input
-      controller = renderer.xr.getController(0);
-      controller.addEventListener('select', onSelect);
-      scene.add(controller);
-
-      // Reticle for placement
-      const geometry = new THREE.RingGeometry(0.1, 0.11, 32).rotateX(-Math.PI / 2);
-      const material = new THREE.MeshBasicMaterial({ color: 0xffffff });
+      // reticle for placement
+      const geometry = new THREE.RingGeometry(0.07, 0.09, 32).rotateX(-Math.PI/2);
+      const material = new THREE.MeshBasicMaterial({ color: 0x00ffff });
       reticle = new THREE.Mesh(geometry, material);
       reticle.matrixAutoUpdate = false;
       reticle.visible = false;
       scene.add(reticle);
 
+      // controller for tap events
+      controller = renderer.xr.getController(0);
+      controller.addEventListener('select', onSelect);
+      scene.add(controller);
+
+      // reset button
+      document.getElementById('reset').addEventListener('click', () => {
+        points.length = 0;
+        markers.forEach(m=>scene.remove(m)); markers.length = 0;
+        lines.forEach(l=>scene.remove(l));     lines.length = 0;
+        sprites.forEach(s=>scene.remove(s));   sprites.length = 0;
+      });
+
       window.addEventListener('resize', onWindowResize);
     }
 
     function onWindowResize() {
-      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.aspect = window.innerWidth/window.innerHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(window.innerWidth, window.innerHeight);
     }
 
     function onSelect() {
-      if (reticle.visible) {
-        const material = new THREE.MeshNormalMaterial();
-        const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 0.1), material);
-        mesh.position.setFromMatrixPosition(reticle.matrix);
-        mesh.rotation.setFromRotationMatrix(reticle.matrix);
-        scene.add(mesh);
+      if (!reticle.visible) return;
+
+      // get tap position
+      const pos = new THREE.Vector3().setFromMatrixPosition(reticle.matrix);
+
+      // marker sphere
+      const sphere = new THREE.Mesh(
+        new THREE.SphereGeometry(0.01, 16, 16),
+        new THREE.MeshBasicMaterial({ color: 0xff0000 })
+      );
+      sphere.position.copy(pos);
+      scene.add(sphere);
+      markers.push(sphere);
+
+      // record point
+      points.push(pos.clone());
+
+      // if at least two, draw line+distance
+      if (points.length >= 2) {
+        const a = points[points.length - 2];
+        const b = points[points.length - 1];
+        const dist = a.distanceTo(b);
+
+        // line
+        const lineGeo = new THREE.BufferGeometry().setFromPoints([a, b]);
+        const lineMat = new THREE.LineBasicMaterial({ color: 0x00ff00 });
+        const line = new THREE.Line(lineGeo, lineMat);
+        scene.add(line);
+        lines.push(line);
+
+        // text sprite at midpoint
+        const mid = new THREE.Vector3().addVectors(a, b).multiplyScalar(0.5);
+        const sprite = makeTextSprite(dist.toFixed(2) + ' m');
+        sprite.position.copy(mid);
+        scene.add(sprite);
+        sprites.push(sprite);
       }
+    }
+
+    function makeTextSprite(message) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 256; canvas.height = 128;
+      const ctx = canvas.getContext('2d');
+      ctx.font = '48px sans-serif';
+      ctx.fillStyle = 'white';
+      ctx.fillText(message, 10, 64);
+      const tex = new THREE.CanvasTexture(canvas);
+      const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false });
+      const sprite = new THREE.Sprite(mat);
+      sprite.scale.set(0.2, 0.1, 1);
+      return sprite;
     }
 
     function animate() {
@@ -74,12 +134,13 @@
 
     function render(timestamp, frame) {
       if (frame) {
-        const referenceSpace = renderer.xr.getReferenceSpace();
         const session = renderer.xr.getSession();
+        const refSpace = renderer.xr.getReferenceSpace();
 
+        // request hit-test source once
         if (!hitTestSourceRequested) {
-          session.requestReferenceSpace('viewer').then((refSpace) => {
-            session.requestHitTestSource({ space: refSpace }).then((source) => {
+          session.requestReferenceSpace('viewer').then((viewerSpace) => {
+            session.requestHitTestSource({ space: viewerSpace }).then((source) => {
               hitTestSource = source;
             });
           });
@@ -90,11 +151,12 @@
           hitTestSourceRequested = true;
         }
 
+        // perform hit test
         if (hitTestSource) {
           const hitTestResults = frame.getHitTestResults(hitTestSource);
-          if (hitTestResults.length) {
+          if (hitTestResults.length > 0) {
             const hit = hitTestResults[0];
-            const pose = hit.getPose(referenceSpace);
+            const pose = hit.getPose(refSpace);
             reticle.visible = true;
             reticle.matrix.fromArray(pose.transform.matrix);
           } else {
@@ -106,27 +168,5 @@
       renderer.render(scene, camera);
     }
   </script>
-  <style>
-    body {
-      margin: 0;
-      overflow: hidden;
-      font-family: sans-serif;
-    }
-    button {
-      position: absolute;
-      bottom: 20px;
-      left: 50%;
-      transform: translateX(-50%);
-      padding: 12px 24px;
-      font-size: 16px;
-      background: #007aff;
-      color: white;
-      border: none;
-      border-radius: 4px;
-    }
-  </style>
-</head>
-<body>
-  <!-- Tap the AR button, then tap on a flat surface to place a cube! -->
 </body>
 </html>
