@@ -2,86 +2,127 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>AR Group Photo Booth</title>
+  <title>AR Alien Defender</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <style>
-    /* Basic reset and styling */
-    body {
+    /* Basic reset and full-screen canvas */
+    body, html {
       margin: 0;
-      font-family: sans-serif;
-      background: #222;
-      color: #ddd;
+      padding: 0;
       overflow: hidden;
+      background-color: #000;
+      font-family: sans-serif;
     }
-    /* Container for file upload UI */
-    #uploadUI {
+    /* HUD overlay (score, health, wave) */
+    #hud {
       position: absolute;
-      top: 20px;
-      left: 50%;
-      transform: translateX(-50%);
-      z-index: 10;
-      background: rgba(0, 0, 0, 0.8);
-      padding: 15px;
-      border-radius: 8px;
-      text-align: center;
-    }
-    #uploadUI input {
+      top: 10px;
+      left: 10px;
+      background: rgba(0, 0, 0, 0.6);
+      color: #fff;
+      padding: 8px 12px;
       font-size: 16px;
+      border-radius: 5px;
+      z-index: 10;
+      white-space: pre-line;
     }
-    /* Instruction message overlay */
+    /* Instruction / message overlay */
     #message {
       position: absolute;
-      bottom: 20px;
+      bottom: 10px;
       left: 50%;
       transform: translateX(-50%);
-      z-index: 10;
       background: rgba(0, 0, 0, 0.7);
+      color: #fff;
       padding: 10px 20px;
       border-radius: 5px;
-      font-size: 16px;
+      font-size: 18px;
+      z-index: 10;
+    }
+    /* Game Over overlay */
+    #gameOver {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(0,0,0,0.9);
+      color: #fff;
+      padding: 20px;
+      border-radius: 10px;
+      font-size: 20px;
+      text-align: center;
+      z-index: 20;
+      display: none;
+    }
+    #gameOver button {
+      margin-top: 15px;
+      padding: 10px 20px;
+      font-size: 18px;
+      cursor: pointer;
     }
   </style>
-  <!-- Load face-api.js (non-module) from CDN -->
-  <script defer src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
 </head>
 <body>
-  <!-- File upload UI -->
-  <div id="uploadUI">
-    <div style="margin-bottom: 10px;">Upload a group photo to get started:</div>
-    <input type="file" id="fileInput" accept="image/*">
-  </div>
-  <!-- Instruction / status message -->
-  <div id="message">Please upload a group photo.</div>
+  <!-- HUD displays game stats -->
+  <div id="hud">Score: 0
+Health: 100
+Wave: 1</div>
+  <!-- Instruction / message overlay -->
+  <div id="message">Tap on a detected surface to place your base.</div>
+  <!-- Game Over overlay -->
+  <div id="gameOver"></div>
 
-  <!-- AR scene will be added dynamically by Three.js -->
+  <!-- Main game code -->
   <script type="module">
+    // Import Three.js and ARButton from CDN
     import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.146.0/build/three.module.js';
     import { ARButton } from 'https://cdn.jsdelivr.net/npm/three@0.146.0/examples/jsm/webxr/ARButton.js';
 
-    // ----------------------------
-    // Global Variables and State
-    // ----------------------------
+    /**********************
+     * Global Variables
+     **********************/
     let scene, camera, renderer, controller, reticle;
-    let hitTestSource = null, hitTestSourceRequested = false;
-    // This texture will hold our augmented photo once processed.
-    let augmentedTexture = null;
-    // Flag to ensure the photo is placed only once.
-    let placedAugmentedPhoto = false;
+    let hitTestSource = null;
+    let hitTestSourceRequested = false;
 
-    // UI elements for file input and messages.
-    const uploadUI = document.getElementById("uploadUI");
-    const fileInput = document.getElementById("fileInput");
+    // Game states: "setup" before base is placed; "playing" during active gameplay; "gameover" when finished.
+    let gameState = "setup";
+    let basePosition = new THREE.Vector3();   // Base anchoring position (set in setup)
+    const BASE_RADIUS = 0.3;                    // Radius (in meters) representing our base area
+    let gameStartTime = 0;
+
+    // Game metrics
+    let score = 0;
+    let baseHealth = 100;
+    let wave = 1;
+
+    // Enemy and explosion containers
+    let enemies = [];      // Each enemy is an object with { mesh, speed }
+    let explosions = [];   // Particle explosions
+
+    // Timing for enemy spawning
+    let lastSpawnTime = 0;
+    let spawnInterval = 2000; // Initial spawn interval in ms
+
+    // For rendering delta time
+    let lastFrameTime = performance.now();
+
+    /**********************
+     * UI Elements
+     **********************/
+    const hudEl = document.getElementById("hud");
     const messageEl = document.getElementById("message");
+    const gameOverEl = document.getElementById("gameOver");
 
-    // ----------------------------
-    // Initialize AR Scene
-    // ----------------------------
-    function initAR() {
-      // Create scene and camera.
+    /**********************
+     * Initialization
+     **********************/
+    function init() {
+      // Scene and camera setup.
       scene = new THREE.Scene();
-      camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.01, 20);
-      
-      // Create renderer.
+      camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+
+      // Renderer with XR support.
       renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
       renderer.setPixelRatio(window.devicePixelRatio);
       renderer.setSize(window.innerWidth, window.innerHeight);
@@ -93,55 +134,202 @@
       light.position.set(0.5, 1, 0.25);
       scene.add(light);
 
-      // Reticle for hit testing.
+      // Create reticle for hit testing (used in setup mode).
       reticle = new THREE.Mesh(
-        new THREE.RingGeometry(0.15, 0.2, 32).rotateX(-Math.PI/2),
+        new THREE.RingGeometry(0.15, 0.2, 32).rotateX(-Math.PI / 2),
         new THREE.MeshBasicMaterial({ color: 0x00ff00 })
       );
       reticle.matrixAutoUpdate = false;
       reticle.visible = false;
       scene.add(reticle);
 
-      // Controller for tap/select events.
+      // Controller for detecting tap events.
       controller = renderer.xr.getController(0);
       controller.addEventListener('select', onSelect);
       scene.add(controller);
 
-      // Add AR button.
+      // Add AR button (requires hit-test support).
       document.body.appendChild(ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] }));
 
+      // Handle window resizes.
       window.addEventListener('resize', onWindowResize, false);
-      renderer.setAnimationLoop(render);
     }
 
     function onWindowResize() {
-      camera.aspect = window.innerWidth/window.innerHeight;
+      camera.aspect = window.innerWidth / window.innerHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(window.innerWidth, window.innerHeight);
     }
 
-    // When the user taps the screen, place the augmented photo (if available).
+    /**********************
+     * Game Functions
+     **********************/
+    // Called when a tap (select event) occurs.
     function onSelect() {
-      if (reticle.visible && augmentedTexture && !placedAugmentedPhoto) {
-        // Create a plane geometry. We'll maintain the aspect ratio of the processed image.
-        const imgWidth = augmentedTexture.image.width;
-        const imgHeight = augmentedTexture.image.height;
-        const aspect = imgHeight / imgWidth;
-        const geometry = new THREE.PlaneGeometry(1, 1 * aspect);
-        const material = new THREE.MeshBasicMaterial({ map: augmentedTexture, side: THREE.DoubleSide });
-        const mesh = new THREE.Mesh(geometry, material);
-        // Position the plane at the reticle's location.
-        mesh.position.setFromMatrixPosition(reticle.matrix);
-        // Align the plane with the hit surface.
-        mesh.quaternion.setFromRotationMatrix(reticle.matrix);
-        scene.add(mesh);
-        placedAugmentedPhoto = true;
-        messageEl.innerText = "Augmented photo placed!";
+      if (gameState === "setup") {
+        // In setup mode, if the reticle is visible, set the base position.
+        if (reticle.visible) {
+          reticle.matrix.decompose(basePosition, new THREE.Quaternion(), new THREE.Vector3());
+          // Add a visual marker for the base.
+          const geometry = new THREE.CylinderGeometry(BASE_RADIUS, BASE_RADIUS, 0.05, 32);
+          const material = new THREE.MeshBasicMaterial({ color: 0x00ff00 });
+          const baseMarker = new THREE.Mesh(geometry, material);
+          baseMarker.position.copy(basePosition);
+          baseMarker.position.y -= 0.025; // slightly below to appear on the floor
+          scene.add(baseMarker);
+          // Switch to playing mode.
+          gameState = "playing";
+          gameStartTime = performance.now();
+          messageEl.innerText = "Game Start! Tap on aliens to shoot them.";
+        }
+      } else if (gameState === "playing") {
+        // In playing mode, cast a ray from the screen center to detect enemy hits.
+        const tapPos = new THREE.Vector2(0, 0); // center of view.
+        const raycaster = new THREE.Raycaster();
+        raycaster.setFromCamera(tapPos, camera);
+        const enemyMeshes = enemies.map(e => e.mesh);
+        const intersects = raycaster.intersectObjects(enemyMeshes);
+        if (intersects.length > 0) {
+          // If an enemy is hit, remove it and trigger explosion.
+          const hitEnemyMesh = intersects[0].object;
+          for (let i = 0; i < enemies.length; i++) {
+            if (enemies[i].mesh === hitEnemyMesh) {
+              createExplosion(enemies[i].mesh.position);
+              scene.remove(enemies[i].mesh);
+              enemies.splice(i, 1);
+              score += 10;
+              break;
+            }
+          }
+        }
+      } else if (gameState === "gameover") {
+        // In game over state, allow tap to restart.
+        restartGame();
       }
     }
 
-    // AR render loop.
+    // Spawns an enemy at a random position around the base.
+    function spawnEnemy() {
+      const spawnDistance = 2.0;  // enemies spawn 2 meters from the base.
+      const angle = Math.random() * Math.PI * 2;
+      const pos = new THREE.Vector3(
+        basePosition.x + spawnDistance * Math.cos(angle),
+        basePosition.y,
+        basePosition.z + spawnDistance * Math.sin(angle)
+      );
+      // Define a simple enemy as a red sphere.
+      const geometry = new THREE.SphereGeometry(0.1, 16, 16);
+      const material = new THREE.MeshPhongMaterial({ color: 0xff0000 });
+      const enemyMesh = new THREE.Mesh(geometry, material);
+      enemyMesh.position.copy(pos);
+      scene.add(enemyMesh);
+      // Speed is randomized (in meters per millisecond).
+      const speed = 0.0005 + Math.random() * 0.0005;
+      enemies.push({ mesh: enemyMesh, speed: speed });
+    }
+
+    // Update enemy positions each frame.
+    function updateEnemies(deltaTime) {
+      for (let i = enemies.length - 1; i >= 0; i--) {
+        const enemy = enemies[i];
+        // Compute direction from enemy to base.
+        const direction = new THREE.Vector3().subVectors(basePosition, enemy.mesh.position).normalize();
+        enemy.mesh.position.addScaledVector(direction, enemy.speed * deltaTime);
+        // If an enemy reaches the base (within BASE_RADIUS), subtract health.
+        const distance = enemy.mesh.position.distanceTo(basePosition);
+        if (distance < BASE_RADIUS) {
+          baseHealth -= 10;
+          scene.remove(enemy.mesh);
+          enemies.splice(i, 1);
+          createExplosion(enemy.mesh.position);
+        }
+      }
+    }
+
+    // Create an explosion particle effect at a given position.
+    function createExplosion(position) {
+      const particleCount = 20;
+      for (let i = 0; i < particleCount; i++) {
+        const geometry = new THREE.SphereGeometry(0.02, 8, 8);
+        const material = new THREE.MeshBasicMaterial({ color: 0xffff00, transparent: true });
+        const particle = new THREE.Mesh(geometry, material);
+        particle.position.copy(position);
+        // Random velocity vector.
+        const velocity = new THREE.Vector3(
+          (Math.random() - 0.5) * 0.01,
+          (Math.random() - 0.5) * 0.01,
+          (Math.random() - 0.5) * 0.01
+        );
+        scene.add(particle);
+        explosions.push({ mesh: particle, velocity: velocity, lifetime: 1000, created: performance.now() });
+      }
+    }
+
+    // Update explosion particles (move them and fade out).
+    function updateExplosions(deltaTime) {
+      const now = performance.now();
+      for (let i = explosions.length - 1; i >= 0; i--) {
+        const p = explosions[i];
+        const age = now - p.created;
+        if (age > p.lifetime) {
+          scene.remove(p.mesh);
+          explosions.splice(i, 1);
+        } else {
+          p.mesh.position.addScaledVector(p.velocity, deltaTime);
+          const fade = 1 - age / p.lifetime;
+          p.mesh.material.opacity = fade;
+        }
+      }
+    }
+
+    // Update the HUD overlay.
+    function updateHUD() {
+      hudEl.innerText = `Score: ${score}\nHealth: ${baseHealth}\nWave: ${wave}`;
+    }
+
+    // Game loop update function.
+    function updateGame(deltaTime) {
+      if (gameState === "playing") {
+        const now = performance.now();
+        if (now - lastSpawnTime > spawnInterval) {
+          spawnEnemy();
+          lastSpawnTime = now;
+        }
+        updateEnemies(deltaTime);
+        updateExplosions(deltaTime);
+        updateHUD();
+        // Increase difficulty over time:
+        const elapsed = (now - gameStartTime) / 1000;
+        wave = Math.floor(elapsed / 20) + 1;
+        spawnInterval = Math.max(600, 2000 - (wave - 1) * 200);
+        // Game over condition: base health depleted.
+        if (baseHealth <= 0) {
+          gameState = "gameover";
+          messageEl.innerText = "Game Over! Tap to Restart.";
+          showGameOver();
+        }
+      }
+    }
+
+    // Display the Game Over overlay.
+    function showGameOver() {
+      gameOverEl.style.display = "block";
+      gameOverEl.innerHTML = `Game Over!<br>Final Score: ${score}<br><button id="restartButton">Restart</button>`;
+      document.getElementById("restartButton").addEventListener("click", restartGame);
+    }
+
+    // Restart the game by reloading the page.
+    function restartGame() {
+      window.location.reload();
+    }
+
+    /**********************
+     * AR Render Loop
+     **********************/
     function render(timestamp, frame) {
+      const deltaTime = timestamp - lastFrameTime;
+      lastFrameTime = timestamp;
+
       if (frame) {
         const referenceSpace = renderer.xr.getReferenceSpace();
         const session = renderer.xr.getSession();
@@ -157,120 +345,27 @@
           });
           hitTestSourceRequested = true;
         }
-        if (hitTestSource) {
+        // Only update the reticle in setup mode.
+        if (hitTestSource && gameState === "setup") {
           const hitTestResults = frame.getHitTestResults(hitTestSource);
-          if (hitTestResults.length) {
+          if (hitTestResults.length > 0) {
             const hit = hitTestResults[0];
             reticle.visible = true;
             reticle.matrix.fromArray(hit.getPose(referenceSpace).transform.matrix);
-            if (!placedAugmentedPhoto && augmentedTexture) {
-              messageEl.innerText = "Tap on a surface to place your augmented photo.";
-            }
           } else {
             reticle.visible = false;
           }
         }
       }
+      updateGame(deltaTime);
       renderer.render(scene, camera);
     }
 
-    // ----------------------------
-    // Photo Upload and Processing
-    // ----------------------------
-    // When the user selects a file, process it.
-    fileInput.addEventListener("change", (event) => {
-      const file = event.target.files[0];
-      if (!file) return;
-      const reader = new FileReader();
-      reader.onload = async (e) => {
-        const img = new Image();
-        img.onload = async () => {
-          // Create an offscreen canvas to process the photo.
-          const canvas = document.createElement("canvas");
-          canvas.width = img.width;
-          canvas.height = img.height;
-          const ctx = canvas.getContext("2d");
-          // Draw the uploaded photo.
-          ctx.drawImage(img, 0, 0);
-          
-          // Run face detection on the canvas using face-api.js.
-          // Use the TinyFaceDetector for fast processing.
-          const detections = await faceapi.detectAllFaces(canvas, new faceapi.TinyFaceDetectorOptions())
-                                        .withFaceLandmarks();
-          // For each detected face, draw fun overlays.
-          detections.forEach(det => {
-            const box = det.detection.box;
-            const landmarks = det.landmarks;
-            
-            // --- Draw Glasses Overlay ---
-            const leftEye = landmarks.getLeftEye();
-            const rightEye = landmarks.getRightEye();
-            // Compute centers of both eyes.
-            const leftCenter = {
-              x: leftEye.reduce((sum, pt) => sum + pt.x, 0) / leftEye.length,
-              y: leftEye.reduce((sum, pt) => sum + pt.y, 0) / leftEye.length
-            };
-            const rightCenter = {
-              x: rightEye.reduce((sum, pt) => sum + pt.x, 0) / rightEye.length,
-              y: rightEye.reduce((sum, pt) => sum + pt.y, 0) / rightEye.length
-            };
-            // Determine distance between eyes.
-            const eyeDist = Math.hypot(rightCenter.x - leftCenter.x, rightCenter.y - leftCenter.y);
-            ctx.strokeStyle = "red";
-            ctx.lineWidth = 5;
-            ctx.beginPath();
-            ctx.arc(leftCenter.x, leftCenter.y, eyeDist / 2.5, 0, 2 * Math.PI);
-            ctx.stroke();
-            ctx.beginPath();
-            ctx.arc(rightCenter.x, rightCenter.y, eyeDist / 2.5, 0, 2 * Math.PI);
-            ctx.stroke();
-
-            // --- Draw Hat Overlay ---
-            // Draw a triangle above the face box.
-            ctx.fillStyle = "blue";
-            const hatHeight = box.height * 0.6;
-            const hatWidth = box.width * 1.2;
-            const centerX = box.x + box.width / 2;
-            const topY = box.y - hatHeight;
-            ctx.beginPath();
-            ctx.moveTo(centerX, topY);
-            ctx.lineTo(centerX - hatWidth / 2, box.y);
-            ctx.lineTo(centerX + hatWidth / 2, box.y);
-            ctx.closePath();
-            ctx.fill();
-          });
-          
-          // Create a Three.js texture from the augmented canvas.
-          augmentedTexture = new THREE.CanvasTexture(canvas);
-          // Hide the upload UI as we're done.
-          uploadUI.style.display = "none";
-          messageEl.innerText = "Augmented photo ready. Enter AR mode and tap on a surface to place it.";
-        };
-        img.src = e.target.result;
-      };
-      reader.readAsDataURL(file);
-    });
-
-    // ----------------------------
-    // Model Loading for Face Detection
-    // ----------------------------
-    // Load models from a public repository.
-    Promise.all([
-      faceapi.nets.tinyFaceDetector.loadFromUri("https://justadudewhohacks.github.io/face-api.js/models/"),
-      faceapi.nets.faceLandmark68Net.loadFromUri("https://justadudewhohacks.github.io/face-api.js/models/")
-    ]).then(() => {
-      console.log("Face detection models loaded.");
-    });
-
-    // ----------------------------
-    // Initialize AR after page load
-    // ----------------------------
-    window.addEventListener("load", () => {
-      // Show file input until the user uploads a photo.
-      uploadUI.style.display = "block";
-      messageEl.innerText = "Upload a group photo to begin.";
-      initAR();
-    });
+    /**********************
+     * Start the App
+     **********************/
+    init();
+    renderer.setAnimationLoop(render);
   </script>
 </body>
 </html>
