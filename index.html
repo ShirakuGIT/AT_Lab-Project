@@ -2,139 +2,101 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>AR Alien Defender</title>
+  <title>AR Whiteboard</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <style>
-    /* Basic reset and full-screen canvas */
-    body, html {
+    /* Basic reset, full screen AR canvas */
+    html, body {
       margin: 0;
       padding: 0;
       overflow: hidden;
-      background-color: #000;
+      background-color: #111;
       font-family: sans-serif;
     }
-    /* HUD overlay (score, health, wave) */
-    #hud {
+    /* UI overlay messages and buttons */
+    #ui {
       position: absolute;
       top: 10px;
-      left: 10px;
-      background: rgba(0, 0, 0, 0.6);
-      color: #fff;
-      padding: 8px 12px;
-      font-size: 16px;
-      border-radius: 5px;
-      z-index: 10;
-      white-space: pre-line;
-    }
-    /* Instruction / message overlay */
-    #message {
-      position: absolute;
-      bottom: 10px;
       left: 50%;
       transform: translateX(-50%);
-      background: rgba(0, 0, 0, 0.7);
-      color: #fff;
-      padding: 10px 20px;
+      z-index: 10;
+      background: rgba(0,0,0,0.7);
+      padding: 10px 15px;
       border-radius: 5px;
-      font-size: 18px;
+      color: #fff;
+      font-size: 16px;
+    }
+    #buttons {
+      position: absolute;
+      top: 60px;
+      left: 50%;
+      transform: translateX(-50%);
       z-index: 10;
     }
-    /* Game Over overlay */
-    #gameOver {
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      transform: translate(-50%, -50%);
-      background: rgba(0,0,0,0.9);
-      color: #fff;
-      padding: 20px;
-      border-radius: 10px;
-      font-size: 20px;
-      text-align: center;
-      z-index: 20;
-      display: none;
-    }
-    #gameOver button {
-      margin-top: 15px;
-      padding: 10px 20px;
-      font-size: 18px;
+    #buttons button {
+      font-size: 16px;
+      padding: 8px 12px;
+      margin: 0 5px;
+      border: none;
+      border-radius: 4px;
       cursor: pointer;
     }
   </style>
 </head>
 <body>
-  <!-- HUD displays game stats -->
-  <div id="hud">Score: 0
-Health: 100
-Wave: 1</div>
-  <!-- Instruction / message overlay -->
-  <div id="message">Tap on a detected surface to place your base.</div>
-  <!-- Game Over overlay -->
-  <div id="gameOver"></div>
+  <!-- UI overlay for instructions -->
+  <div id="ui">Tap on a detected surface to anchor your whiteboard.</div>
+  <!-- Buttons will appear once the board is placed -->
+  <div id="buttons" style="display:none;">
+    <button id="clearButton">Clear Board</button>
+  </div>
 
-  <!-- Main game code -->
+  <!-- Main AR app code -->
   <script type="module">
-    // Import Three.js and ARButton from CDN
+    // Import Three.js and ARButton via CDN.
     import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.146.0/build/three.module.js';
     import { ARButton } from 'https://cdn.jsdelivr.net/npm/three@0.146.0/examples/jsm/webxr/ARButton.js';
 
-    /**********************
+    /*********************
      * Global Variables
-     **********************/
+     *********************/
     let scene, camera, renderer, controller, reticle;
     let hitTestSource = null;
     let hitTestSourceRequested = false;
+    // App mode: "setup" (whiteboard not placed yet) or "draw" (whiteboard placed)
+    let appMode = "setup";
+    // The whiteboard’s mesh and its supporting canvas.
+    let boardMesh, boardCanvas, boardContext, boardTexture;
+    // A flag to track drawing state.
+    let drawing = false;
+    // Last drawing position in canvas coordinates.
+    let lastDrawPos = null;
 
-    // Game states: "setup" before base is placed; "playing" during active gameplay; "gameover" when finished.
-    let gameState = "setup";
-    let basePosition = new THREE.Vector3();   // Base anchoring position (set in setup)
-    const BASE_RADIUS = 0.3;                    // Radius (in meters) representing our base area
-    let gameStartTime = 0;
+    const uiEl = document.getElementById("ui");
+    const buttonsEl = document.getElementById("buttons");
+    const clearButton = document.getElementById("clearButton");
 
-    // Game metrics
-    let score = 0;
-    let baseHealth = 100;
-    let wave = 1;
-
-    // Enemy and explosion containers
-    let enemies = [];      // Each enemy is an object with { mesh, speed }
-    let explosions = [];   // Particle explosions
-
-    // Timing for enemy spawning
-    let lastSpawnTime = 0;
-    let spawnInterval = 2000; // Initial spawn interval in ms
-
-    // For rendering delta time
-    let lastFrameTime = performance.now();
-
-    /**********************
-     * UI Elements
-     **********************/
-    const hudEl = document.getElementById("hud");
-    const messageEl = document.getElementById("message");
-    const gameOverEl = document.getElementById("gameOver");
-
-    /**********************
+    /*********************
      * Initialization
-     **********************/
+     *********************/
     function init() {
-      // Scene and camera setup.
+      // Create scene and camera.
       scene = new THREE.Scene();
       camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
 
-      // Renderer with XR support.
+      // Create renderer with transparency and XR support.
       renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
       renderer.setPixelRatio(window.devicePixelRatio);
       renderer.setSize(window.innerWidth, window.innerHeight);
       renderer.xr.enabled = true;
       document.body.appendChild(renderer.domElement);
 
-      // Basic lighting.
+      // Add a hemisphere light.
       const light = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1);
       light.position.set(0.5, 1, 0.25);
       scene.add(light);
 
-      // Create reticle for hit testing (used in setup mode).
+      // Create a reticle for hit testing in setup mode.
       reticle = new THREE.Mesh(
         new THREE.RingGeometry(0.15, 0.2, 32).rotateX(-Math.PI / 2),
         new THREE.MeshBasicMaterial({ color: 0x00ff00 })
@@ -143,16 +105,21 @@ Wave: 1</div>
       reticle.visible = false;
       scene.add(reticle);
 
-      // Controller for detecting tap events.
+      // Setup controller for tap events.
       controller = renderer.xr.getController(0);
       controller.addEventListener('select', onSelect);
       scene.add(controller);
 
-      // Add AR button (requires hit-test support).
+      // Add ARButton.
       document.body.appendChild(ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] }));
 
-      // Handle window resizes.
+      // Listen for window resize.
       window.addEventListener('resize', onWindowResize, false);
+
+      // Set up pointer events for drawing.
+      renderer.domElement.addEventListener("pointerdown", onPointerDown);
+      renderer.domElement.addEventListener("pointermove", onPointerMove);
+      renderer.domElement.addEventListener("pointerup", onPointerUp);
     }
 
     function onWindowResize() {
@@ -161,176 +128,129 @@ Wave: 1</div>
       renderer.setSize(window.innerWidth, window.innerHeight);
     }
 
-    /**********************
-     * Game Functions
-     **********************/
-    // Called when a tap (select event) occurs.
+    /*********************
+     * AR and Whiteboard Setup
+     *********************/
     function onSelect() {
-      if (gameState === "setup") {
-        // In setup mode, if the reticle is visible, set the base position.
-        if (reticle.visible) {
-          reticle.matrix.decompose(basePosition, new THREE.Quaternion(), new THREE.Vector3());
-          // Add a visual marker for the base.
-          const geometry = new THREE.CylinderGeometry(BASE_RADIUS, BASE_RADIUS, 0.05, 32);
-          const material = new THREE.MeshBasicMaterial({ color: 0x00ff00 });
-          const baseMarker = new THREE.Mesh(geometry, material);
-          baseMarker.position.copy(basePosition);
-          baseMarker.position.y -= 0.025; // slightly below to appear on the floor
-          scene.add(baseMarker);
-          // Switch to playing mode.
-          gameState = "playing";
-          gameStartTime = performance.now();
-          messageEl.innerText = "Game Start! Tap on aliens to shoot them.";
-        }
-      } else if (gameState === "playing") {
-        // In playing mode, cast a ray from the screen center to detect enemy hits.
-        const tapPos = new THREE.Vector2(0, 0); // center of view.
-        const raycaster = new THREE.Raycaster();
-        raycaster.setFromCamera(tapPos, camera);
-        const enemyMeshes = enemies.map(e => e.mesh);
-        const intersects = raycaster.intersectObjects(enemyMeshes);
-        if (intersects.length > 0) {
-          // If an enemy is hit, remove it and trigger explosion.
-          const hitEnemyMesh = intersects[0].object;
-          for (let i = 0; i < enemies.length; i++) {
-            if (enemies[i].mesh === hitEnemyMesh) {
-              createExplosion(enemies[i].mesh.position);
-              scene.remove(enemies[i].mesh);
-              enemies.splice(i, 1);
-              score += 10;
-              break;
-            }
-          }
-        }
-      } else if (gameState === "gameover") {
-        // In game over state, allow tap to restart.
-        restartGame();
+      // In setup mode, a tap places the whiteboard on the detected surface.
+      if (appMode === "setup" && reticle.visible) {
+        // Decompose the reticle's matrix to get position and orientation.
+        const pos = new THREE.Vector3();
+        const quat = new THREE.Quaternion();
+        reticle.matrix.decompose(pos, quat, new THREE.Vector3());
+
+        // Create an offscreen canvas for the whiteboard.
+        boardCanvas = document.createElement('canvas');
+        boardCanvas.width = 1024;
+        boardCanvas.height = 512; // 2:1 aspect ratio (widescreen whiteboard)
+        boardContext = boardCanvas.getContext('2d');
+        // Fill it with white background.
+        boardContext.fillStyle = "#ffffff";
+        boardContext.fillRect(0, 0, boardCanvas.width, boardCanvas.height);
+        boardTexture = new THREE.CanvasTexture(boardCanvas);
+        boardTexture.minFilter = THREE.LinearFilter;
+
+        // Create a plane geometry with matching aspect ratio.
+        const boardWidth = 1.2; // meters (customizable)
+        const boardHeight = boardWidth * (boardCanvas.height / boardCanvas.width);
+        const geometry = new THREE.PlaneGeometry(boardWidth, boardHeight);
+        const material = new THREE.MeshBasicMaterial({ map: boardTexture, side: THREE.DoubleSide });
+        boardMesh = new THREE.Mesh(geometry, material);
+        boardMesh.position.copy(pos);
+        boardMesh.quaternion.copy(quat);
+
+        // Adjust board rotation so it is vertical.
+        boardMesh.rotateX(-Math.PI / 2);
+
+        scene.add(boardMesh);
+        appMode = "draw";
+        // Update UI.
+        uiEl.innerText = "Draw on your AR Whiteboard!";
+        buttonsEl.style.display = "block";
       }
     }
 
-    // Spawns an enemy at a random position around the base.
-    function spawnEnemy() {
-      const spawnDistance = 2.0;  // enemies spawn 2 meters from the base.
-      const angle = Math.random() * Math.PI * 2;
-      const pos = new THREE.Vector3(
-        basePosition.x + spawnDistance * Math.cos(angle),
-        basePosition.y,
-        basePosition.z + spawnDistance * Math.sin(angle)
+    // ---------------------
+    // Drawing Functionality
+    // ---------------------
+    // Convert pointer (screen) coordinates to normalized device coordinates.
+    function getNDCCoordinates(event) {
+      const rect = renderer.domElement.getBoundingClientRect();
+      return new THREE.Vector2(
+        ((event.clientX - rect.left) / rect.width) * 2 - 1,
+        - ((event.clientY - rect.top) / rect.height) * 2 + 1
       );
-      // Define a simple enemy as a red sphere.
-      const geometry = new THREE.SphereGeometry(0.1, 16, 16);
-      const material = new THREE.MeshPhongMaterial({ color: 0xff0000 });
-      const enemyMesh = new THREE.Mesh(geometry, material);
-      enemyMesh.position.copy(pos);
-      scene.add(enemyMesh);
-      // Speed is randomized (in meters per millisecond).
-      const speed = 0.0005 + Math.random() * 0.0005;
-      enemies.push({ mesh: enemyMesh, speed: speed });
     }
 
-    // Update enemy positions each frame.
-    function updateEnemies(deltaTime) {
-      for (let i = enemies.length - 1; i >= 0; i--) {
-        const enemy = enemies[i];
-        // Compute direction from enemy to base.
-        const direction = new THREE.Vector3().subVectors(basePosition, enemy.mesh.position).normalize();
-        enemy.mesh.position.addScaledVector(direction, enemy.speed * deltaTime);
-        // If an enemy reaches the base (within BASE_RADIUS), subtract health.
-        const distance = enemy.mesh.position.distanceTo(basePosition);
-        if (distance < BASE_RADIUS) {
-          baseHealth -= 10;
-          scene.remove(enemy.mesh);
-          enemies.splice(i, 1);
-          createExplosion(enemy.mesh.position);
-        }
+    // Raycast from pointer event to whiteboard.
+    function getBoardIntersection(event) {
+      if (!boardMesh) return null;
+      const ndc = getNDCCoordinates(event);
+      const raycaster = new THREE.Raycaster();
+      raycaster.setFromCamera(ndc, camera);
+      const intersects = raycaster.intersectObject(boardMesh);
+      return intersects.length ? intersects[0] : null;
+    }
+
+    function onPointerDown(event) {
+      // Only allow drawing when whiteboard is placed.
+      if (appMode !== "draw") return;
+      const intersect = getBoardIntersection(event);
+      if (intersect) {
+        drawing = true;
+        // Compute UV coordinates on the board (between 0 and 1).
+        const uv = intersect.uv;
+        // Convert uv to canvas pixel coordinates.
+        const x = uv.x * boardCanvas.width;
+        const y = (1 - uv.y) * boardCanvas.height;
+        lastDrawPos = { x, y };
+        // Begin a new path.
+        boardContext.strokeStyle = "#000000";
+        boardContext.lineWidth = 5;
+        boardContext.beginPath();
+        boardContext.moveTo(x, y);
       }
     }
 
-    // Create an explosion particle effect at a given position.
-    function createExplosion(position) {
-      const particleCount = 20;
-      for (let i = 0; i < particleCount; i++) {
-        const geometry = new THREE.SphereGeometry(0.02, 8, 8);
-        const material = new THREE.MeshBasicMaterial({ color: 0xffff00, transparent: true });
-        const particle = new THREE.Mesh(geometry, material);
-        particle.position.copy(position);
-        // Random velocity vector.
-        const velocity = new THREE.Vector3(
-          (Math.random() - 0.5) * 0.01,
-          (Math.random() - 0.5) * 0.01,
-          (Math.random() - 0.5) * 0.01
-        );
-        scene.add(particle);
-        explosions.push({ mesh: particle, velocity: velocity, lifetime: 1000, created: performance.now() });
+    function onPointerMove(event) {
+      if (!drawing) return;
+      const intersect = getBoardIntersection(event);
+      if (intersect) {
+        const uv = intersect.uv;
+        const x = uv.x * boardCanvas.width;
+        const y = (1 - uv.y) * boardCanvas.height;
+        boardContext.lineTo(x, y);
+        boardContext.stroke();
+        lastDrawPos = { x, y };
+        boardTexture.needsUpdate = true;
       }
     }
 
-    // Update explosion particles (move them and fade out).
-    function updateExplosions(deltaTime) {
-      const now = performance.now();
-      for (let i = explosions.length - 1; i >= 0; i--) {
-        const p = explosions[i];
-        const age = now - p.created;
-        if (age > p.lifetime) {
-          scene.remove(p.mesh);
-          explosions.splice(i, 1);
-        } else {
-          p.mesh.position.addScaledVector(p.velocity, deltaTime);
-          const fade = 1 - age / p.lifetime;
-          p.mesh.material.opacity = fade;
-        }
+    function onPointerUp(event) {
+      if (drawing) {
+        drawing = false;
       }
     }
 
-    // Update the HUD overlay.
-    function updateHUD() {
-      hudEl.innerText = `Score: ${score}\nHealth: ${baseHealth}\nWave: ${wave}`;
-    }
-
-    // Game loop update function.
-    function updateGame(deltaTime) {
-      if (gameState === "playing") {
-        const now = performance.now();
-        if (now - lastSpawnTime > spawnInterval) {
-          spawnEnemy();
-          lastSpawnTime = now;
-        }
-        updateEnemies(deltaTime);
-        updateExplosions(deltaTime);
-        updateHUD();
-        // Increase difficulty over time:
-        const elapsed = (now - gameStartTime) / 1000;
-        wave = Math.floor(elapsed / 20) + 1;
-        spawnInterval = Math.max(600, 2000 - (wave - 1) * 200);
-        // Game over condition: base health depleted.
-        if (baseHealth <= 0) {
-          gameState = "gameover";
-          messageEl.innerText = "Game Over! Tap to Restart.";
-          showGameOver();
-        }
+    // Clear board drawing.
+    clearButton.addEventListener("click", () => {
+      if (boardContext && boardCanvas) {
+        boardContext.fillStyle = "#ffffff";
+        boardContext.fillRect(0, 0, boardCanvas.width, boardCanvas.height);
+        boardTexture.needsUpdate = true;
       }
-    }
+    });
 
-    // Display the Game Over overlay.
-    function showGameOver() {
-      gameOverEl.style.display = "block";
-      gameOverEl.innerHTML = `Game Over!<br>Final Score: ${score}<br><button id="restartButton">Restart</button>`;
-      document.getElementById("restartButton").addEventListener("click", restartGame);
-    }
-
-    // Restart the game by reloading the page.
-    function restartGame() {
-      window.location.reload();
-    }
-
-    /**********************
+    /*********************
      * AR Render Loop
-     **********************/
+     *********************/
+    let lastFrameTime = performance.now();
     function render(timestamp, frame) {
-      const deltaTime = timestamp - lastFrameTime;
+      const delta = timestamp - lastFrameTime;
       lastFrameTime = timestamp;
 
-      if (frame) {
+      // In setup mode, update reticle position with hit testing.
+      if (frame && appMode === "setup") {
         const referenceSpace = renderer.xr.getReferenceSpace();
         const session = renderer.xr.getSession();
         if (!hitTestSourceRequested) {
@@ -345,8 +265,7 @@ Wave: 1</div>
           });
           hitTestSourceRequested = true;
         }
-        // Only update the reticle in setup mode.
-        if (hitTestSource && gameState === "setup") {
+        if (hitTestSource) {
           const hitTestResults = frame.getHitTestResults(hitTestSource);
           if (hitTestResults.length > 0) {
             const hit = hitTestResults[0];
@@ -357,13 +276,12 @@ Wave: 1</div>
           }
         }
       }
-      updateGame(deltaTime);
       renderer.render(scene, camera);
     }
 
-    /**********************
+    /*********************
      * Start the App
-     **********************/
+     *********************/
     init();
     renderer.setAnimationLoop(render);
   </script>
