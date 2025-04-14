@@ -2,141 +2,270 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>AR Drone Shooter</title>
+  <title>AR Home Assistant</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <style>
-    /* Reset margins and set up a full screen canvas */
+    /* Basic reset and full-screen canvas */
     body {
       margin: 0;
       overflow: hidden;
       font-family: sans-serif;
-      background: #000;
+      background: #111;
+      color: #eee;
     }
-    /* Heads-up display: score, timer, and level info */
-    #hud {
-      position: absolute;
-      top: 10px;
-      left: 10px;
-      color: #fff;
-      z-index: 2;
-      font-size: 1.2em;
-      background: rgba(0, 0, 0, 0.5);
-      padding: 8px 12px;
-      border-radius: 5px;
-    }
-    /* Center message for instructions */
+    /* Instructional overlay */
     #message {
       position: absolute;
       top: 50%;
       left: 50%;
       transform: translate(-50%, -50%);
-      color: #fff;
-      font-size: 1.5em;
-      z-index: 2;
-      text-align: center;
-      background: rgba(0,0,0,0.7);
-      padding: 10px 20px;
-      border-radius: 5px;
-    }
-    /* Game over overlay */
-    #gameOver {
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      transform: translate(-50%, -50%);
-      color: #fff;
-      font-size: 1.5em;
-      z-index: 2;
-      text-align: center;
-      background: rgba(0,0,0,0.9);
+      background: rgba(0, 0, 0, 0.75);
       padding: 20px 30px;
       border-radius: 10px;
-      display: none;
+      font-size: 1.2em;
+      z-index: 2;
+      text-align: center;
     }
-    button {
+    /* HUD to display current mode */
+    #hud {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: rgba(0,0,0,0.6);
+      padding: 8px 12px;
+      border-radius: 5px;
       font-size: 1em;
-      padding: 10px 20px;
-      margin-top: 10px;
-      cursor: pointer;
+      z-index: 2;
     }
   </style>
 </head>
 <body>
-  <!-- HUD: displays score, timer, and level -->
-  <div id="hud">
-    <div id="score">Score: 0</div>
-    <div id="timer">Time: 60</div>
-    <div id="level">Level: 1</div>
-  </div>
-  <!-- Instruction message -->
-  <div id="message">Tap on a detected surface to place your arena</div>
-  <!-- Game over overlay -->
-  <div id="gameOver">
-    Game Over!<br>
-    Final Score: <span id="finalScore"></span><br>
-    <button id="restartButton">Restart</button>
-  </div>
-  
-  <!-- Main AR game code -->
+  <!-- Instruction message overlay -->
+  <div id="message">Tap on a detected surface to place your AR Home Hub</div>
+  <!-- Heads-up display (HUD) -->
+  <div id="hud">Mode: Setup</div>
+
+  <!-- Main AR Home Assistant app code -->
   <script type="module">
-    // Import Three.js and ARButton for WebXR from CDN
+    /**********************************************************************
+     * AR Home Assistant – A Markerless AR Assistive Application
+     *
+     * This app is aimed at providing an interactive AR interface that helps
+     * elderly users (or any user) access daily schedule info, medication
+     * reminders, and emergency contacts. Once a flat surface is detected, you
+     * tap to “anchor” your personal hub. Around that hub, several interactive 
+     * panels (cards) appear and always face the viewer. Tap on a panel to 
+     * toggle between a quick glance (collapsed) and a more detailed view.
+     *
+     * All assets are loaded via CDN. Deploy this file to GitHub Pages (via HTTPS)
+     * and test on a WebXR‑compatible device (for example, Chrome on Android).
+     **********************************************************************/
+
+    // Import Three.js and ARButton from CDN:
     import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.146.0/build/three.module.js';
     import { ARButton } from 'https://cdn.jsdelivr.net/npm/three@0.146.0/examples/jsm/webxr/ARButton.js';
 
-    // ------------------------
-    // Basic Three.js Setup
-    // ------------------------
-    let camera, scene, renderer;
-    let controller;
-    let reticle;
+    // -------------------------------
+    // Global Variables & App State
+    // -------------------------------
+    let scene, camera, renderer, controller, reticle;
     let hitTestSource = null;
     let hitTestSourceRequested = false;
 
-    // -------------------------
-    // Game State Variables
-    // -------------------------
-    const GAME_DURATION = 60; // seconds
-    const ARENA_RADIUS = 2.0; // meters (arena is a circle around anchor)
-    let gameState = "setup"; // "setup", "playing", "over"
-    let gameAnchor = new THREE.Vector3();
-    let gameStartTime = 0;
-    let score = 0;
-    let level = 1;
-    // For enemy drones and particle effects:
-    let enemies = [];
-    let particles = [];
-    let spawnIntervalId = null;
-    let nextSpawnTime = 0;
-    let spawnInterval = 1500; // milliseconds
-    const MIN_SPAWN_INTERVAL = 600; // as difficulty increases, spawn faster
+    // Our two main modes: "setup" (waiting for user to anchor the hub)
+    // and "service" (the AR home hub with interactive panels)
+    let appState = "setup";
+    // The hub’s anchor position (set after the user selects a hit-test point)
+    const hubAnchor = new THREE.Vector3();
 
-    // Raycaster for detecting hits (taps) on enemies
-    const raycaster = new THREE.Raycaster();
+    // Panels array will hold our interactive panel objects
+    const panels = [];
 
-    // ---------------------------
-    // Initialization and Setup
-    // ---------------------------
-    init();
-    animate();
+    // Reference to the HUD and message DOM elements for instructions
+    const hudEl = document.getElementById('hud');
+    const messageEl = document.getElementById('message');
 
+    // -------------------------------
+    // Interactive Panel Class
+    // -------------------------------
+    class InteractivePanel {
+      /**
+       * id: Unique identifier for the panel.
+       * title: Panel title.
+       * collapsedContent: Array of text lines to show in collapsed mode.
+       * expandedContent: Array of text lines for expanded (detailed) mode.
+       */
+      constructor(id, title, collapsedContent, expandedContent) {
+        this.id = id;
+        this.title = title;
+        this.collapsedContent = collapsedContent;
+        this.expandedContent = expandedContent;
+        this.expanded = false;  // Initial state: collapsed
+
+        // Dimensions of panel (in AR meters)
+        this.width = 0.5;
+        this.height = 0.3;
+
+        // Create an offscreen canvas to draw the panel’s content.
+        this.canvas = document.createElement('canvas');
+        this.canvas.width = 512;
+        this.canvas.height = 256;
+        this.context = this.canvas.getContext('2d');
+
+        // Create texture from canvas and set material (DoubleSide allows viewing from both faces)
+        this.texture = new THREE.CanvasTexture(this.canvas);
+        this.material = new THREE.MeshBasicMaterial({
+          map: this.texture,
+          side: THREE.DoubleSide,
+          transparent: true
+        });
+
+        // Create a plane geometry using the provided dimensions.
+        this.geometry = new THREE.PlaneGeometry(this.width, this.height);
+        this.mesh = new THREE.Mesh(this.geometry, this.material);
+
+        // Update the canvas with the initial (collapsed) view.
+        this.updatePanel();
+      }
+
+      // Redraws the canvas content based on the current state.
+      updatePanel() {
+        const ctx = this.context;
+        // Clear the canvas.
+        ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+        // Draw a semi‐transparent background.
+        ctx.fillStyle = 'rgba(0, 100, 150, 0.8)';
+        ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+        // Draw the title.
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 36px sans-serif';
+        ctx.fillText(this.title, 20, 50);
+        // Underline the title.
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(20, 60);
+        ctx.lineTo(this.canvas.width - 20, 60);
+        ctx.stroke();
+        // Draw content lines.
+        ctx.font = '28px sans-serif';
+        const lines = this.expanded ? this.expandedContent : this.collapsedContent;
+        let startY = 100;
+        for (let line of lines) {
+          ctx.fillText(line, 20, startY);
+          startY += 40;
+        }
+        // Draw a hint at the bottom.
+        ctx.font = '24px sans-serif';
+        ctx.fillStyle = '#ff0';
+        const hint = this.expanded ? 'Tap to collapse' : 'Tap to expand';
+        ctx.fillText(hint, 20, this.canvas.height - 20);
+        // Mark the texture for update.
+        this.texture.needsUpdate = true;
+      }
+
+      // Toggle between collapsed and expanded modes.
+      toggle() {
+        this.expanded = !this.expanded;
+        this.updatePanel();
+      }
+    }
+
+    // -------------------------------
+    // Create and Position Panels
+    // -------------------------------
+    function createPanels() {
+      // Create sample panels with demo content.
+
+      // 1. Daily Schedule Panel.
+      panels.push(new InteractivePanel(
+        'schedule',
+        'Daily Schedule',
+        [
+          '9:00 AM - Breakfast',
+          '10:30 AM - Doctor'
+        ],
+        [
+          'Breakfast: 9:00 AM in Dining Room',
+          'Doctor Appointment: 10:30 AM, Room 207',
+          '11:30 AM - Light Exercise',
+          '2:00 PM - Reading'
+        ]
+      ));
+
+      // 2. Medication Reminder Panel.
+      panels.push(new InteractivePanel(
+        'medication',
+        'Medication',
+        [
+          '8:00 AM - BP Med',
+          '8:00 PM - Cholesterol'
+        ],
+        [
+          '8:00 AM: Take 1 pill of Blood Pressure Med',
+          '8:00 PM: Take 1 pill of Cholesterol Med'
+        ]
+      ));
+
+      // 3. Emergency Contacts Panel.
+      panels.push(new InteractivePanel(
+        'contacts',
+        'Emergency Contacts',
+        [
+          'Alice: 555-1234',
+          'Bob: 555-5678'
+        ],
+        [
+          'Alice (Daughter): 555-1234',
+          'Bob (Neighbor): 555-5678',
+          'Charlie (Doctor): 555-9012'
+        ]
+      ));
+
+      // Position each panel in an arc around the hub.
+      // For three panels, we’ll place them at –30°, 0°, and +30° at 0.8m away, and 0.8m high.
+      const numPanels = panels.length;
+      const radius = 0.8;  // meters from hub
+      const baseY = hubAnchor.y + 0.8;  // vertically offset from hub anchor
+
+      // Angles in radians: -30°, 0°, +30°.
+      const angles = [ -Math.PI / 6, 0, Math.PI / 6 ];
+      panels.forEach((panel, i) => {
+        const angle = angles[i];
+        panel.mesh.position.set(
+          hubAnchor.x + radius * Math.sin(angle),
+          baseY,
+          hubAnchor.z + radius * Math.cos(angle)
+        );
+        // Optionally, give a slight initial rotation.
+        panel.mesh.rotation.y = angle;
+        scene.add(panel.mesh);
+      });
+    }
+
+    // -------------------------------
+    // Initialize Three.js & AR Components
+    // -------------------------------
     function init() {
-      // Create scene and camera
+      // Create our Three.js scene.
       scene = new THREE.Scene();
+
+      // Setup camera.
       camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
 
-      // Create WebGL renderer with XR support and transparency
+      // Configure renderer with transparency and XR support.
       renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
       renderer.setPixelRatio(window.devicePixelRatio);
       renderer.setSize(window.innerWidth, window.innerHeight);
       renderer.xr.enabled = true;
       document.body.appendChild(renderer.domElement);
 
-      // Add a hemisphere light for basic illumination
+      // Add a basic hemisphere light.
       const light = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1);
       light.position.set(0.5, 1, 0.25);
       scene.add(light);
 
-      // Create a reticle (ring) for hit testing in setup mode
+      // Create a reticle – used in setup mode for hit testing.
       reticle = new THREE.Mesh(
         new THREE.RingGeometry(0.15, 0.2, 32).rotateX(-Math.PI / 2),
         new THREE.MeshBasicMaterial({ color: 0x00ff00 })
@@ -145,236 +274,78 @@
       reticle.visible = false;
       scene.add(reticle);
 
-      // Create a controller to receive tap/select events
+      // Create a controller to listen for “select” (tap) events.
       controller = renderer.xr.getController(0);
       controller.addEventListener('select', onSelect);
       scene.add(controller);
 
-      // Add the AR button to the page for starting an AR session
+      // Add the ARButton to start the AR session (requires hit-test feature).
       document.body.appendChild(ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] }));
 
-      // Listen for window resize events
+      // Handle window resize.
       window.addEventListener('resize', onWindowResize, false);
-
-      // Restart button: reloads the page to start fresh
-      document.getElementById('restartButton').addEventListener('click', () => {
-        window.location.reload();
-      });
     }
 
-    // ----------------------------------
-    // Select (Tap) Handler for Controller
-    // ----------------------------------
+    // -------------------------------
+    // Handle Controller Tap Events
+    // -------------------------------
     function onSelect() {
-      if (gameState === "setup") {
-        // Setup: tap places the arena anchor
+      if (appState === "setup") {
+        // In setup mode, if the reticle is visible, anchor the hub.
         if (reticle.visible) {
-          gameAnchor.setFromMatrixPosition(reticle.matrix);
-          startGame();
+          reticle.matrix.decompose(hubAnchor, new THREE.Quaternion(), new THREE.Vector3());
+          // Hide the instruction message.
+          messageEl.innerText = 'AR Home Hub anchored. Tap on panels for details.';
+          // Update HUD.
+          hudEl.innerText = 'Mode: Home Hub';
+
+          // Create interactive panels relative to the hub anchor.
+          createPanels();
+
+          // Switch to service mode.
+          appState = "service";
         }
-      } else if (gameState === "playing") {
-        // Playing: tap to shoot enemy drones!
-        // Cast a ray from the center of the screen
-        const tapPos = new THREE.Vector2(0, 0); // center of view
+      } else if (appState === "service") {
+        // In service mode, cast a ray from the center to detect panel taps.
+        const tapPos = new THREE.Vector2(0, 0); // center of the view
+        const raycaster = new THREE.Raycaster();
         raycaster.setFromCamera(tapPos, camera);
-        // Check intersections against enemy meshes
-        const intersects = raycaster.intersectObjects(enemies.map(e => e.mesh));
+        // Create an array of panel meshes for intersection.
+        const panelMeshes = panels.map(panel => panel.mesh);
+        const intersects = raycaster.intersectObjects(panelMeshes);
         if (intersects.length > 0) {
-          // Hit! Trigger explosion effect and remove enemy.
-          const enemyMesh = intersects[0].object;
-          explodeEnemy(enemyMesh);
-          // Remove enemy from array
-          enemies = enemies.filter(e => e.mesh !== enemyMesh);
-          scene.remove(enemyMesh);
-          score += 1;
-          updateHUD();
+          // Toggle the first panel that was hit.
+          const hitMesh = intersects[0].object;
+          // Find the matching panel and toggle it.
+          panels.forEach(panel => {
+            if (panel.mesh === hitMesh) {
+              panel.toggle();
+            }
+          });
         }
       }
     }
 
-    // -----------------------------
-    // Start the Game after Anchor Set
-    // -----------------------------
-    function startGame() {
-      gameState = "playing";
-      gameStartTime = performance.now();
-      document.getElementById('message').innerText = '';
-      reticle.visible = false;
-
-      // Start spawning enemies (drones)
-      spawnIntervalId = setInterval(() => {
-        spawnEnemy();
-      }, spawnInterval);
-      
-      updateHUD();
-    }
-
-    // -----------------------------
-    // Enemy Drone and Behavior
-    // -----------------------------
-    // Create an enemy drone: a small box with a propeller effect (rotating top)
-    function spawnEnemy() {
-      if (gameState !== "playing") return;
-
-      // Create a group for the enemy drone
-      const enemyGroup = new THREE.Group();
-
-      // Main body: a box
-      const bodyGeo = new THREE.BoxGeometry(0.15, 0.08, 0.15);
-      const bodyMat = new THREE.MeshPhongMaterial({ color: Math.random() * 0xffffff });
-      const bodyMesh = new THREE.Mesh(bodyGeo, bodyMat);
-      enemyGroup.add(bodyMesh);
-
-      // Propeller: a thin, flat box on top of the body
-      const propGeo = new THREE.BoxGeometry(0.2, 0.02, 0.05);
-      const propMat = new THREE.MeshPhongMaterial({ color: 0x222222 });
-      const propMesh = new THREE.Mesh(propGeo, propMat);
-      propMesh.position.y = 0.07;
-      enemyGroup.add(propMesh);
-
-      // Random starting angle along the boundary of the arena
-      const angle = Math.random() * Math.PI * 2;
-      enemyGroup.position.set(
-        gameAnchor.x + ARENA_RADIUS * Math.cos(angle),
-        gameAnchor.y,
-        gameAnchor.z + ARENA_RADIUS * Math.sin(angle)
-      );
-
-      // Set random velocity toward the center, with some lateral variation.
-      const speed = 0.001 + Math.random() * 0.002; // meters per ms
-      // Compute direction vector from spawn point toward a random point near the anchor
-      const targetOffset = new THREE.Vector3((Math.random()-0.5)*0.8, 0, (Math.random()-0.5)*0.8);
-      const targetPos = new THREE.Vector3().addVectors(gameAnchor, targetOffset);
-      const direction = new THREE.Vector3().subVectors(targetPos, enemyGroup.position).normalize();
-      const velocity = direction.multiplyScalar(speed);
-
-      // Save enemy info in an object
-      const enemy = {
-        mesh: enemyGroup,
-        velocity: velocity,
-        propeller: propMesh,
-        created: performance.now()
-      };
-      enemies.push(enemy);
-      scene.add(enemyGroup);
-    }
-
-    // Animate enemy drones (movement, propeller spin, and arena bouncing)
-    function updateEnemies(delta) {
-      enemies.forEach(enemy => {
-        // Move enemy based on its velocity and delta time
-        enemy.mesh.position.addScaledVector(enemy.velocity, delta);
-        // Simple bouncing: if enemy goes outside the arena, reflect its velocity
-        const offset = new THREE.Vector3().subVectors(enemy.mesh.position, gameAnchor);
-        if (offset.length() > ARENA_RADIUS) {
-          const normal = offset.normalize();
-          // Reflect velocity: v - 2*(v·n)*n
-          const dot = enemy.velocity.dot(normal);
-          enemy.velocity.sub(normal.multiplyScalar(2 * dot));
-        }
-        // Rotate the enemy group (simulate rolling) and spin the propeller faster.
-        enemy.mesh.rotation.y += 0.005 * delta;
-        enemy.propeller.rotation.z += 0.2 * delta;
-      });
-    }
-
-    // ------------------------------------------
-    // Particle Explosion Effect for Enemy Hit
-    // ------------------------------------------
-    function explodeEnemy(enemyMesh) {
-      const explosionCount = 20;
-      const origin = enemyMesh.position.clone();
-      for (let i = 0; i < explosionCount; i++) {
-        // Each particle is a small sphere.
-        const geo = new THREE.SphereGeometry(0.01, 8, 8);
-        const mat = new THREE.MeshBasicMaterial({ color: Math.random() * 0xffffff });
-        const particleMesh = new THREE.Mesh(geo, mat);
-        particleMesh.position.copy(origin);
-        // Assign a random velocity vector
-        const theta = Math.random() * Math.PI * 2;
-        const phi = Math.random() * Math.PI;
-        const speed = 0.002 + Math.random() * 0.003;
-        const velocity = new THREE.Vector3(
-          speed * Math.sin(phi) * Math.cos(theta),
-          speed * Math.cos(phi),
-          speed * Math.sin(phi) * Math.sin(theta)
-        );
-        // Save particle info
-        particles.push({
-          mesh: particleMesh,
-          velocity: velocity,
-          created: performance.now(),
-          lifetime: 600 // milliseconds
-        });
-        scene.add(particleMesh);
-      }
-    }
-
-    // Update particles: move them and remove after lifetime expires.
-    function updateParticles(delta) {
-      const now = performance.now();
-      particles = particles.filter(particle => {
-        const age = now - particle.created;
-        if (age > particle.lifetime) {
-          scene.remove(particle.mesh);
-          return false;
-        } else {
-          particle.mesh.position.addScaledVector(particle.velocity, delta);
-          // Optionally fade out particles by reducing opacity (if using a transparent material)
-          return true;
-        }
-      });
-    }
-
-    // -----------------------------
-    // HUD Updates: Score, Timer, Level
-    // -----------------------------
-    function updateHUD() {
-      document.getElementById('score').innerText = `Score: ${score}`;
-      if (gameState === "playing") {
-        const elapsed = (performance.now() - gameStartTime) / 1000;
-        const remaining = Math.max(0, Math.floor(GAME_DURATION - elapsed));
-        document.getElementById('timer').innerText = `Time: ${remaining}`;
-        document.getElementById('level').innerText = `Level: ${level}`;
-      }
-    }
-
-    // ----------------------------
-    // End the Game
-    // ----------------------------
-    function endGame() {
-      gameState = "over";
-      clearInterval(spawnIntervalId);
-      enemies.forEach(e => scene.remove(e.mesh));
-      enemies = [];
-      // Show game over dialog with final score.
-      document.getElementById('gameOver').style.display = 'block';
-      document.getElementById('finalScore').innerText = score;
-    }
-
-    // -------------------------
-    // Handling Window Resize
-    // -------------------------
+    // -------------------------------
+    // Window Resize Handler
+    // -------------------------------
     function onWindowResize() {
       camera.aspect = window.innerWidth / window.innerHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(window.innerWidth, window.innerHeight);
     }
 
-    // -------------------------
-    // Main Animation Loop
-    // -------------------------
+    // -------------------------------
+    // Animation Loop
+    // -------------------------------
     let lastFrameTime = performance.now();
     function animate() {
       renderer.setAnimationLoop(render);
     }
 
     function render(timestamp, frame) {
-      const delta = timestamp - lastFrameTime;
-      lastFrameTime = timestamp;
-
-      // Setup Mode: update reticle with hit testing.
-      if (gameState === "setup") {
+      // In setup mode, update the reticle using hit testing.
+      if (appState === "setup") {
         if (frame) {
           const referenceSpace = renderer.xr.getReferenceSpace();
           const session = renderer.xr.getSession();
@@ -401,27 +372,22 @@
             }
           }
         }
-      }
-      // Playing Mode: update enemy positions, particles, and check timer.
-      if (gameState === "playing") {
-        updateEnemies(delta);
-        updateParticles(delta);
-        updateHUD();
-        const elapsed = (performance.now() - gameStartTime) / 1000;
-        // Level progression: every 15 seconds, level up and spawn faster.
-        if (Math.floor(elapsed / 15) + 1 > level) {
-          level = Math.floor(elapsed / 15) + 1;
-          spawnInterval = Math.max(MIN_SPAWN_INTERVAL, spawnInterval - 200);
-          // Clear previous interval and start a new spawn schedule.
-          clearInterval(spawnIntervalId);
-          spawnIntervalId = setInterval(spawnEnemy, spawnInterval);
-        }
-        if (elapsed >= GAME_DURATION) {
-          endGame();
-        }
+      } else if (appState === "service") {
+        // In service mode, update each panel so that it always faces the camera.
+        panels.forEach(panel => {
+          // Make the panel “billboard” toward the camera.
+          panel.mesh.lookAt(camera.position);
+        });
       }
       renderer.render(scene, camera);
+      lastFrameTime = timestamp;
     }
+
+    // -------------------------------
+    // Initialize and Start the App
+    // -------------------------------
+    init();
+    animate();
   </script>
 </body>
 </html>
