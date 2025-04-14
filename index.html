@@ -2,110 +2,105 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>AR Whiteboard</title>
+  <title>AR Room Planner</title>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <style>
-    /* Basic reset, full screen AR canvas */
+    /* Basic reset, full-screen canvas */
     html, body {
       margin: 0;
       padding: 0;
       overflow: hidden;
       background-color: #111;
-      font-family: sans-serif;
+      font-family: Arial, sans-serif;
     }
-    /* UI overlay messages and buttons */
-    #ui {
+    /* HUD overlay for instructions and measurements */
+    #hud {
       position: absolute;
       top: 10px;
       left: 50%;
       transform: translateX(-50%);
       z-index: 10;
-      background: rgba(0,0,0,0.7);
+      background: rgba(0, 0, 0, 0.7);
       padding: 10px 15px;
       border-radius: 5px;
       color: #fff;
       font-size: 16px;
+      text-align: center;
     }
-    #buttons {
+    /* Button overlay to clear markers */
+    #clearButton {
       position: absolute;
-      top: 60px;
+      bottom: 20px;
       left: 50%;
       transform: translateX(-50%);
       z-index: 10;
-    }
-    #buttons button {
-      font-size: 16px;
-      padding: 8px 12px;
-      margin: 0 5px;
+      background: #0066cc;
+      padding: 10px 20px;
       border: none;
-      border-radius: 4px;
+      border-radius: 5px;
+      color: #fff;
+      font-size: 16px;
       cursor: pointer;
     }
   </style>
 </head>
 <body>
-  <!-- UI overlay for instructions -->
-  <div id="ui">Tap on a detected surface to anchor your whiteboard.</div>
-  <!-- Buttons will appear once the board is placed -->
-  <div id="buttons" style="display:none;">
-    <button id="clearButton">Clear Board</button>
-  </div>
+  <!-- HUD overlay -->
+  <div id="hud">Tap on a surface to add a marker.
+Perimeter: 0.00 m   |   Area: 0.00 m²</div>
+  <!-- Clear markers button -->
+  <button id="clearButton">Clear Markers</button>
 
-  <!-- Main AR app code -->
+  <!-- Main AR App Code -->
   <script type="module">
     // Import Three.js and ARButton via CDN.
     import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.146.0/build/three.module.js';
     import { ARButton } from 'https://cdn.jsdelivr.net/npm/three@0.146.0/examples/jsm/webxr/ARButton.js';
 
-    /*********************
+    /********************
      * Global Variables
-     *********************/
+     ********************/
     let scene, camera, renderer, controller, reticle;
     let hitTestSource = null;
     let hitTestSourceRequested = false;
-    // App mode: "setup" (whiteboard not placed yet) or "draw" (whiteboard placed)
-    let appMode = "setup";
-    // The whiteboard’s mesh and its supporting canvas.
-    let boardMesh, boardCanvas, boardContext, boardTexture;
-    // A flag to track drawing state.
-    let drawing = false;
-    // Last drawing position in canvas coordinates.
-    let lastDrawPos = null;
-
-    const uiEl = document.getElementById("ui");
-    const buttonsEl = document.getElementById("buttons");
+    // Array to hold marker objects (each is a THREE.Mesh)
+    const markers = [];
+    // A single THREE.Line that connects all markers.
+    let lineMesh = null;
+    // UI elements.
+    const hudEl = document.getElementById("hud");
     const clearButton = document.getElementById("clearButton");
 
-    /*********************
-     * Initialization
-     *********************/
+    /********************
+     * AR & Scene Setup
+     ********************/
     function init() {
-      // Create scene and camera.
+      // Scene and camera.
       scene = new THREE.Scene();
-      camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+      camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.01, 20);
 
-      // Create renderer with transparency and XR support.
+      // Renderer with XR support.
       renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
       renderer.setPixelRatio(window.devicePixelRatio);
       renderer.setSize(window.innerWidth, window.innerHeight);
       renderer.xr.enabled = true;
       document.body.appendChild(renderer.domElement);
 
-      // Add a hemisphere light.
+      // Basic light.
       const light = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1);
       light.position.set(0.5, 1, 0.25);
       scene.add(light);
 
-      // Create a reticle for hit testing in setup mode.
+      // Reticle for hit testing.
       reticle = new THREE.Mesh(
-        new THREE.RingGeometry(0.15, 0.2, 32).rotateX(-Math.PI / 2),
+        new THREE.RingGeometry(0.15, 0.2, 32).rotateX(-Math.PI/2),
         new THREE.MeshBasicMaterial({ color: 0x00ff00 })
       );
       reticle.matrixAutoUpdate = false;
       reticle.visible = false;
       scene.add(reticle);
 
-      // Setup controller for tap events.
+      // Controller to listen for tap/select events.
       controller = renderer.xr.getController(0);
       controller.addEventListener('select', onSelect);
       scene.add(controller);
@@ -113,144 +108,105 @@
       // Add ARButton.
       document.body.appendChild(ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] }));
 
-      // Listen for window resize.
+      // Resize listener.
       window.addEventListener('resize', onWindowResize, false);
-
-      // Set up pointer events for drawing.
-      renderer.domElement.addEventListener("pointerdown", onPointerDown);
-      renderer.domElement.addEventListener("pointermove", onPointerMove);
-      renderer.domElement.addEventListener("pointerup", onPointerUp);
     }
 
     function onWindowResize() {
-      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.aspect = window.innerWidth/window.innerHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(window.innerWidth, window.innerHeight);
     }
 
-    /*********************
-     * AR and Whiteboard Setup
-     *********************/
+    /********************
+     * Marker & Measurement Functions
+     ********************/
+    // When the user taps (select event), add a marker at the reticle.
     function onSelect() {
-      // In setup mode, a tap places the whiteboard on the detected surface.
-      if (appMode === "setup" && reticle.visible) {
-        // Decompose the reticle's matrix to get position and orientation.
+      if (reticle.visible) {
+        // Get position of the reticle.
         const pos = new THREE.Vector3();
-        const quat = new THREE.Quaternion();
-        reticle.matrix.decompose(pos, quat, new THREE.Vector3());
-
-        // Create an offscreen canvas for the whiteboard.
-        boardCanvas = document.createElement('canvas');
-        boardCanvas.width = 1024;
-        boardCanvas.height = 512; // 2:1 aspect ratio (widescreen whiteboard)
-        boardContext = boardCanvas.getContext('2d');
-        // Fill it with white background.
-        boardContext.fillStyle = "#ffffff";
-        boardContext.fillRect(0, 0, boardCanvas.width, boardCanvas.height);
-        boardTexture = new THREE.CanvasTexture(boardCanvas);
-        boardTexture.minFilter = THREE.LinearFilter;
-
-        // Create a plane geometry with matching aspect ratio.
-        const boardWidth = 1.2; // meters (customizable)
-        const boardHeight = boardWidth * (boardCanvas.height / boardCanvas.width);
-        const geometry = new THREE.PlaneGeometry(boardWidth, boardHeight);
-        const material = new THREE.MeshBasicMaterial({ map: boardTexture, side: THREE.DoubleSide });
-        boardMesh = new THREE.Mesh(geometry, material);
-        boardMesh.position.copy(pos);
-        boardMesh.quaternion.copy(quat);
-
-        // Adjust board rotation so it is vertical.
-        boardMesh.rotateX(-Math.PI / 2);
-
-        scene.add(boardMesh);
-        appMode = "draw";
-        // Update UI.
-        uiEl.innerText = "Draw on your AR Whiteboard!";
-        buttonsEl.style.display = "block";
+        reticle.matrix.decompose(pos, new THREE.Quaternion(), new THREE.Vector3());
+        // Create a small sphere as a marker.
+        const geometry = new THREE.SphereGeometry(0.03, 16, 16);
+        const material = new THREE.MeshBasicMaterial({ color: 0xffff00 });
+        const marker = new THREE.Mesh(geometry, material);
+        marker.position.copy(pos);
+        scene.add(marker);
+        markers.push(marker);
+        updateLine();
+        updateHUD();
       }
     }
 
-    // ---------------------
-    // Drawing Functionality
-    // ---------------------
-    // Convert pointer (screen) coordinates to normalized device coordinates.
-    function getNDCCoordinates(event) {
-      const rect = renderer.domElement.getBoundingClientRect();
-      return new THREE.Vector2(
-        ((event.clientX - rect.left) / rect.width) * 2 - 1,
-        - ((event.clientY - rect.top) / rect.height) * 2 + 1
-      );
-    }
-
-    // Raycast from pointer event to whiteboard.
-    function getBoardIntersection(event) {
-      if (!boardMesh) return null;
-      const ndc = getNDCCoordinates(event);
-      const raycaster = new THREE.Raycaster();
-      raycaster.setFromCamera(ndc, camera);
-      const intersects = raycaster.intersectObject(boardMesh);
-      return intersects.length ? intersects[0] : null;
-    }
-
-    function onPointerDown(event) {
-      // Only allow drawing when whiteboard is placed.
-      if (appMode !== "draw") return;
-      const intersect = getBoardIntersection(event);
-      if (intersect) {
-        drawing = true;
-        // Compute UV coordinates on the board (between 0 and 1).
-        const uv = intersect.uv;
-        // Convert uv to canvas pixel coordinates.
-        const x = uv.x * boardCanvas.width;
-        const y = (1 - uv.y) * boardCanvas.height;
-        lastDrawPos = { x, y };
-        // Begin a new path.
-        boardContext.strokeStyle = "#000000";
-        boardContext.lineWidth = 5;
-        boardContext.beginPath();
-        boardContext.moveTo(x, y);
+    // Build or update a line connecting all markers.
+    function updateLine() {
+      // Remove previous line from the scene.
+      if (lineMesh) {
+        scene.remove(lineMesh);
       }
+      if (markers.length < 2) return;
+      // Create an array of positions.
+      const points = markers.map(marker => marker.position.clone());
+      // Optionally, if you want to close the polygon:
+      // points.push(markers[0].position.clone());
+      const geometry = new THREE.BufferGeometry().setFromPoints(points);
+      const material = new THREE.LineBasicMaterial({ color: 0x00ffff, linewidth: 2 });
+      lineMesh = new THREE.Line(geometry, material);
+      scene.add(lineMesh);
     }
 
-    function onPointerMove(event) {
-      if (!drawing) return;
-      const intersect = getBoardIntersection(event);
-      if (intersect) {
-        const uv = intersect.uv;
-        const x = uv.x * boardCanvas.width;
-        const y = (1 - uv.y) * boardCanvas.height;
-        boardContext.lineTo(x, y);
-        boardContext.stroke();
-        lastDrawPos = { x, y };
-        boardTexture.needsUpdate = true;
+    // Compute the total perimeter and area (projecting marker positions onto X-Z plane).
+    function computeMeasurements() {
+      let perimeter = 0;
+      let area = 0;
+      if (markers.length < 2) return { perimeter, area };
+      const pts = markers.map(marker => new THREE.Vector2(marker.position.x, marker.position.z));
+      // Perimeter: sum of distances between consecutive points.
+      for (let i = 0; i < pts.length; i++) {
+        const j = (i + 1) % pts.length;
+        perimeter += pts[i].distanceTo(pts[j]);
       }
-    }
-
-    function onPointerUp(event) {
-      if (drawing) {
-        drawing = false;
+      // Area using the shoelace formula (if at least 3 points exist).
+      if (pts.length >= 3) {
+        let sum = 0;
+        for (let i = 0; i < pts.length; i++) {
+          const j = (i + 1) % pts.length;
+          sum += pts[i].x * pts[j].y - pts[j].x * pts[i].y;
+        }
+        area = Math.abs(sum) / 2;
       }
+      return { perimeter, area };
     }
 
-    // Clear board drawing.
+    // Update the HUD with measurements.
+    function updateHUD() {
+      const { perimeter, area } = computeMeasurements();
+      hudEl.innerText = `Tap on a surface to add a marker.
+Markers: ${markers.length}
+Perimeter: ${perimeter.toFixed(2)} m   |   Area: ${area.toFixed(2)} m²`;
+    }
+
+    // Clear all markers and reset measurements.
     clearButton.addEventListener("click", () => {
-      if (boardContext && boardCanvas) {
-        boardContext.fillStyle = "#ffffff";
-        boardContext.fillRect(0, 0, boardCanvas.width, boardCanvas.height);
-        boardTexture.needsUpdate = true;
+      markers.forEach(marker => scene.remove(marker));
+      markers.length = 0;
+      if (lineMesh) {
+        scene.remove(lineMesh);
+        lineMesh = null;
       }
+      updateHUD();
     });
 
-    /*********************
+    /********************
      * AR Render Loop
-     *********************/
+     ********************/
     let lastFrameTime = performance.now();
     function render(timestamp, frame) {
       const delta = timestamp - lastFrameTime;
       lastFrameTime = timestamp;
 
-      // In setup mode, update reticle position with hit testing.
-      if (frame && appMode === "setup") {
+      if (frame) {
         const referenceSpace = renderer.xr.getReferenceSpace();
         const session = renderer.xr.getSession();
         if (!hitTestSourceRequested) {
@@ -279,9 +235,9 @@
       renderer.render(scene, camera);
     }
 
-    /*********************
+    /********************
      * Start the App
-     *********************/
+     ********************/
     init();
     renderer.setAnimationLoop(render);
   </script>
